@@ -1015,6 +1015,8 @@
         }, 600);
     }
 
+    let isConfirmClickScheduled = false;
+
     function clickConfirmPaymentButton(attempts = 0) {
         if (!state.enabled) return;
 
@@ -1070,23 +1072,41 @@
             confirmBtn = payPanel.querySelector('.next-btn-primary, button.next-btn-primary, .automation-btn-confirm, button[type="submit"]');
         }
 
+        if (!confirmBtn) {
+            const fallbackBtns = document.querySelectorAll('.plcae-order .btn, .order-wrap .btn, [data-spm-anchor-id*="shipping"]');
+            for (let el of fallbackBtns) {
+                const text = (el.innerText || el.textContent || '').trim().toUpperCase();
+                if (text === 'CONFIRM' || text === 'PAY NOW') {
+                    if (el.offsetWidth > 0 && el.offsetHeight > 0) {
+                        confirmBtn = el;
+                        break;
+                    }
+                }
+            }
+        }
+
         if (confirmBtn) {
-            triggerClick(confirmBtn);
-            updateStatus('🎉 CLICKED CONFIRM / PAY NOW! Order placement completed!', 'success');
-
-            const itemTitle = document.querySelector('.pdp-mod-product-badge-title, .product-title, h1, .title')?.textContent?.trim() || 'Lazada Product';
-            const price = document.querySelector('.pdp-price_type_normal, .product-price, .order-total-price, .delivery-item-price')?.textContent?.trim() || '';
-            const msg = `🎉 <b>Lazada Order Placed Successfully!</b>\n\n` +
-                        `📦 <b>Product:</b> ${itemTitle}\n` +
-                        (price ? `💰 <b>Price:</b> ${price}\n` : '') +
-                        `💳 <b>Payment:</b> Credit Card Details Submitted & Confirmed\n` +
-                        `⏰ <b>Time:</b> ${new Date().toLocaleString()}\n` +
-                        `🔗 <b>URL:</b> ${window.location.href}`;
-
-            sendTelegramNotification(msg);
-
-            state.enabled = false;
-            setConfig(state);
+            if (isConfirmClickScheduled) return;
+            
+            const randomDelay = Math.floor(Math.random() * (1500 - 500 + 1)) + 500;
+            let timeLeft = randomDelay;
+            isConfirmClickScheduled = true;
+            
+            updateStatus(`⏳ Next click in ${timeLeft}ms...`, 'info');
+            
+            const countInterval = setInterval(() => {
+                timeLeft -= 100;
+                if (timeLeft > 0) {
+                    updateStatus(`⏳ Next click in ${timeLeft}ms...`, 'info');
+                } else {
+                    clearInterval(countInterval);
+                    isConfirmClickScheduled = false;
+                    if (!state.enabled) return;
+                    
+                    triggerClick(confirmBtn);
+                    updateStatus('🚀 CLICKED CONFIRM! Processing...', 'success');
+                }
+            }, 100);
         } else if (attempts < 15) {
             updateStatus('Confirm button inside payment panel not clickable yet, retrying...', 'warn');
             setTimeout(() => clickConfirmPaymentButton(attempts + 1), 400);
@@ -1113,6 +1133,7 @@
 
         // Check Out of stock conditions
         const isOutOfStock = checkIsOutOfStock();
+        const isInStock = checkIsInStock();
 
         if (isOutOfStock) {
             if (!reloadTimer) {
@@ -1121,12 +1142,26 @@
                 timeUntilReload = Math.floor(Math.random() * (max - min + 1)) + min;
                 startRefreshCountdown();
             }
-        } else {
+        } else if (isInStock) {
             // Cancel any ongoing reload countdown if it comes in stock dynamically
             if (reloadTimer) { clearInterval(reloadTimer); reloadTimer = null; }
             if (checkLoopTimer) { clearInterval(checkLoopTimer); checkLoopTimer = null; }
             handleInStock();
         }
+    }
+
+    function checkIsInStock() {
+        const buyNowBtn = document.querySelector('.add-to-cart-buy-now-btn, button.add-to-cart-buy-now-btn');
+        if (buyNowBtn && !buyNowBtn.disabled && !buyNowBtn.classList.contains('disabled')) {
+            return true;
+        }
+        
+        const redMartAddToCartBtn = document.querySelector('.pdp-redmart-add-to-cart button, .redmart-cart-btn button');
+        if (redMartAddToCartBtn && !redMartAddToCartBtn.disabled) {
+            return true;
+        }
+
+        return false;
     }
 
     function checkIsOutOfStock() {
