@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Lazada Auto Stock Monitor & Quick Buy Bot
 // @namespace    http://tampermonkey.net/
-// @version      1.3
-// @description  Automated stock checker using Lazada's internal MTOP API (no page refresh = anti-bot safe), with DOM fallback. Includes quantity selector and Buy Now trigger with modern GUI.
+// @version      1.2
+// @description  Automated stock checker, quantity selector, and Buy Now trigger for Lazada with modern GUI.
 // @author       Pythonic Shariful
 // @match        https://*.lazada.sg/*
 // @match        https://s.lazada.sg/*
@@ -441,8 +441,6 @@
 
             if (reloadTimer) { clearInterval(reloadTimer); reloadTimer = null; }
             if (checkLoopTimer) { clearInterval(checkLoopTimer); checkLoopTimer = null; }
-            if (mtopPollTimer) { clearInterval(mtopPollTimer); mtopPollTimer = null; }
-            isMtopPolling = false;
 
             stopBtn.classList.add('hidden');
             startBtn.classList.remove('hidden');
@@ -568,239 +566,27 @@
 
     // --- Anti-Bot / Baxia Security Check Detection ---
     function checkBaxiaPunish() {
-        return document.querySelector(
-            '#baxia-dialog-content, ' +
-            'iframe[src*="bixi.alicdn.com/punish"], ' +
-            'iframe[src*="action=deny"], ' +
-            'iframe[src*="punish:resource"], ' +
-            'iframe[src*="_____tmd_____/punish"], ' +
-            'iframe[src*="action=captcha"]'
-        );
+        return document.querySelector('#baxia-dialog-content, iframe[src*="bixi.alicdn.com/punish"], iframe[src*="action=deny"], iframe[src*="punish:resource"]');
     }
-
-    let baxiaAutoSolveTimer = null;   // monitors captcha disappearance
-    let baxiaClickAttempts = 0;       // how many times we've tried clicking
-    let baxiaSolveMode = false;       // true while we're in captcha-solve mode
 
     function handleBaxiaPunishDetected(iframeEl) {
-        // Pause timers but don't disable the bot - we'll resume after solve
         if (reloadTimer) { clearInterval(reloadTimer); reloadTimer = null; }
-        if (mtopPollTimer) { clearInterval(mtopPollTimer); mtopPollTimer = null; }
-        isMtopPolling = false;
-        // NOTE: we intentionally keep checkLoopTimer running but at reduced rate
-        //       so botTick keeps monitoring until the captcha is gone.
+        if (checkLoopTimer) { clearInterval(checkLoopTimer); checkLoopTimer = null; }
 
-        if (baxiaSolveMode) return; // Already handling - don't double-fire
-        baxiaSolveMode = true;
-        baxiaClickAttempts = 0;
+        state.enabled = false;
+        setConfig(state);
 
-        updateStatus('🤖 Captcha detected! Attempting auto-solve...', 'warn');
+        updateStatus('🚨 Security Check / Baxia Captcha Detected! Bot stopped.', 'error');
 
         const iframeSrc = iframeEl ? (iframeEl.src || iframeEl.getAttribute('src') || 'Unknown') : 'Detected';
-        const isRecaptcha = iframeSrc.includes('captcharecaptcha') || iframeSrc.includes('recaptcha');
+        const msg = `⚠️ <b>LAZADA SECURITY CHECK / PUNISH DETECTED!</b>\n\n` +
+                    `🚨 <b>Anti-Bot Dialog:</b> Baxia / Punish Check triggered\n` +
+                    `🔗 <b>Page URL:</b> ${window.location.href}\n` +
+                    `🖼️ <b>Iframe Src:</b> ${iframeSrc}\n` +
+                    `⏰ <b>Time:</b> ${new Date().toLocaleString()}\n\n` +
+                    `<i>Bot has been stopped. Please complete captcha / security check manually.</i>`;
 
-        // Send Telegram alert (non-blocking)
-        sendTelegramNotification(
-            `⚠️ <b>Baxia Captcha Triggered</b>\n\n` +
-            `🔍 <b>Type:</b> ${isRecaptcha ? 'reCAPTCHA' : 'Baxia Punish'}\n` +
-            `🔗 <b>Page:</b> ${window.location.href}\n` +
-            `⏰ <b>Time:</b> ${new Date().toLocaleString()}\n` +
-            `<i>Attempting auto-click... Bot will resume if solved.</i>`
-        );
-
-        // Try auto-clicking the reCAPTCHA checkbox
-        tryAutoClickCaptcha(iframeEl, isRecaptcha);
-
-        // Monitor for captcha disappearance (MutationObserver)
-        watchForCaptchaResolution();
-    }
-
-    // Attempt to auto-click the reCAPTCHA "I am not a robot" checkbox
-    function tryAutoClickCaptcha(baxiaIframe, isRecaptcha) {
-        if (!state.enabled && !baxiaSolveMode) return;
-        baxiaClickAttempts++;
-
-        // Strategy 1: Find the nested Google reCAPTCHA iframe by title/name
-        //   Google reCAPTCHA embeds: <iframe title="reCAPTCHA" src="https://www.google.com/recaptcha/...">
-        //   We can find it in the main document (if Lazada injected it at top-level)
-        const recaptchaIframes = document.querySelectorAll(
-            'iframe[title="reCAPTCHA"], ' +
-            'iframe[src*="recaptcha/api2/anchor"], ' +
-            'iframe[src*="recaptcha/enterprise/anchor"], ' +
-            'iframe[src*="www.google.com/recaptcha"]'
-        );
-
-        if (recaptchaIframes.length > 0) {
-            for (const rcIframe of recaptchaIframes) {
-                if (rcIframe.offsetWidth > 0 && rcIframe.offsetHeight > 0) {
-                    updateStatus(`🤖 Found reCAPTCHA iframe! Clicking checkbox (attempt ${baxiaClickAttempts})...`, 'warn');
-                    clickInsideRecaptchaIframe(rcIframe);
-                    break;
-                }
-            }
-        } else {
-            // Strategy 2: Click on baxia iframe itself at the expected checkbox position.
-            // reCAPTCHA checkbox is at roughly (35, 35) inside the iframe widget.
-            // The baxia iframe is the container - we find the expected offset.
-            if (baxiaIframe && baxiaIframe.offsetWidth > 0) {
-                updateStatus(`🤖 Clicking baxia container at checkbox position (attempt ${baxiaClickAttempts})...`, 'warn');
-                clickAtIframeCheckboxPosition(baxiaIframe);
-            }
-        }
-
-        // Retry auto-click every 2s for up to 10 attempts
-        if (baxiaClickAttempts < 10) {
-            setTimeout(() => {
-                if (!baxiaSolveMode) return; // Already resolved
-                const stillPresent = checkBaxiaPunish();
-                if (stillPresent) {
-                    tryAutoClickCaptcha(stillPresent, isRecaptcha);
-                }
-            }, 2000);
-        } else {
-            // Gave up auto-solving - notify user to solve manually, keep waiting
-            updateStatus('⚠️ Auto-solve failed. Please solve CAPTCHA manually. Bot will auto-resume.', 'error');
-            sendTelegramNotification(
-                `🚨 <b>Auto-solve FAILED</b>\n` +
-                `Please solve the Lazada CAPTCHA manually.\n` +
-                `🔗 ${window.location.href}\n` +
-                `<i>Bot will auto-resume once CAPTCHA is solved.</i>`
-            );
-        }
-    }
-
-    // Click the checkbox inside a Google reCAPTCHA iframe
-    // The checkbox element is inside a cross-origin iframe, so we use
-    // simulated pointer events at the element's screen position instead.
-    function clickInsideRecaptchaIframe(iframe) {
-        try {
-            const rect = iframe.getBoundingClientRect();
-            // reCAPTCHA checkbox is at approx (28, 28) inside the iframe
-            const clickX = rect.left + 28;
-            const clickY = rect.top + 28;
-
-            // Simulate realistic pointer event sequence at the checkbox position
-            const evtOpts = (type, x, y) => new PointerEvent(type, {
-                bubbles: true, cancelable: true,
-                clientX: x, clientY: y,
-                pointerId: 1, pointerType: 'mouse',
-                view: window
-            });
-
-            document.elementFromPoint(clickX, clickY)?.dispatchEvent(evtOpts('pointerdown', clickX, clickY));
-            document.elementFromPoint(clickX, clickY)?.dispatchEvent(evtOpts('pointerup', clickX, clickY));
-
-            // Use elementFromPoint to get the element at that exact coordinate
-            const el = document.elementFromPoint(clickX, clickY);
-            if (el) {
-                el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: clickX, clientY: clickY, view: window }));
-            }
-
-            // Also dispatch directly on the iframe
-            iframe.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: clickX, clientY: clickY, view: window }));
-
-            console.log(`🤖 [Lazada Bot] Clicked reCAPTCHA at (${clickX.toFixed(0)}, ${clickY.toFixed(0)})`);
-        } catch (e) {
-            console.warn('🤖 [Lazada Bot] reCAPTCHA click error:', e);
-        }
-    }
-
-    // Fallback: click the baxia wrapper iframe at the expected inner checkbox position
-    function clickAtIframeCheckboxPosition(baxiaIframe) {
-        try {
-            const rect = baxiaIframe.getBoundingClientRect();
-            // Guess that the reCAPTCHA widget is rendered ~40px from left, ~50% of height
-            // Typical Lazada baxia dialog has reCAPTCHA centered; try multiple positions
-            const positions = [
-                { x: rect.left + 35, y: rect.top + (rect.height * 0.5) },  // centre-left
-                { x: rect.left + 35, y: rect.top + 60 },                   // fixed 60px from top
-                { x: rect.left + 35, y: rect.top + 100 },                  // fixed 100px from top
-                { x: rect.left + (rect.width * 0.15), y: rect.top + (rect.height * 0.45) }, // 15% x, 45% y
-            ];
-
-            positions.forEach(({ x, y }, i) => {
-                setTimeout(() => {
-                    if (!baxiaSolveMode) return;
-                    const el = document.elementFromPoint(x, y);
-                    if (el) {
-                        el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, clientX: x, clientY: y, view: window }));
-                        el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, clientX: x, clientY: y, view: window }));
-                        el.dispatchEvent(new MouseEvent('mouseup',   { bubbles: true, clientX: x, clientY: y, view: window }));
-                        el.dispatchEvent(new MouseEvent('click',     { bubbles: true, clientX: x, clientY: y, view: window }));
-                    }
-                    console.log(`🤖 [Lazada Bot] Baxia iframe click position ${i+1}: (${x.toFixed(0)}, ${y.toFixed(0)})`);
-                }, i * 300);
-            });
-        } catch (e) {
-            console.warn('🤖 [Lazada Bot] Baxia iframe position click error:', e);
-        }
-    }
-
-    // Watch for the baxia/captcha iframe to disappear, then auto-resume bot
-    function watchForCaptchaResolution() {
-        if (baxiaAutoSolveTimer) clearInterval(baxiaAutoSolveTimer);
-
-        let checkCount = 0;
-        baxiaAutoSolveTimer = setInterval(() => {
-            checkCount++;
-            const stillThere = checkBaxiaPunish();
-
-            if (!stillThere) {
-                // Captcha solved! Resume the bot.
-                clearInterval(baxiaAutoSolveTimer);
-                baxiaAutoSolveTimer = null;
-                baxiaSolveMode = false;
-                baxiaClickAttempts = 0;
-
-                updateStatus('✅ CAPTCHA solved! Bot resuming in 2s...', 'success');
-                sendTelegramNotification(
-                    `✅ <b>CAPTCHA Solved!</b>\n` +
-                    `Bot is resuming automatically.\n` +
-                    `🔗 ${window.location.href}`
-                );
-
-                // Short delay to let the page settle, then resume
-                setTimeout(() => {
-                    if (state.enabled) {
-                        checkAndRunBot();
-                    }
-                }, 2000);
-
-            } else if (checkCount > 180) {
-                // Timed out after ~3 minutes - stop the bot
-                clearInterval(baxiaAutoSolveTimer);
-                baxiaAutoSolveTimer = null;
-                baxiaSolveMode = false;
-
-                state.enabled = false;
-                setConfig(state);
-                updateStatus('🚨 CAPTCHA timeout (3min). Bot stopped. Solve manually.', 'error');
-                sendTelegramNotification(
-                    `🚨 <b>CAPTCHA Timeout!</b>\n` +
-                    `Could not solve CAPTCHA within 3 minutes.\nBot has been stopped.\n` +
-                    `🔗 ${window.location.href}`
-                );
-
-                // Update UI buttons to reflect stopped state
-                const startBtn = document.getElementById('bot-start-btn');
-                const stopBtn  = document.getElementById('bot-stop-btn');
-                const statusDot = document.querySelector('.bot-status-dot');
-                if (startBtn) startBtn.classList.remove('hidden');
-                if (stopBtn)  stopBtn.classList.add('hidden');
-                if (statusDot) statusDot.classList.remove('active');
-            } else {
-                // Still waiting - update status every 10s
-                if (checkCount % 10 === 0) {
-                    const secondsLeft = 180 - checkCount;
-                    updateStatus(
-                        baxiaClickAttempts < 10
-                            ? `🤖 Auto-solving CAPTCHA... (${secondsLeft}s timeout)`
-                            : `⌛ Waiting for manual CAPTCHA solve... (${secondsLeft}s)`,
-                        'warn'
-                    );
-                }
-            }
-        }, 1000); // Check every second
+        sendTelegramNotification(msg);
     }
 
     // --- Main Bot Logic ---
@@ -820,13 +606,8 @@
             // Check Baxia / Punish security dialog
             const baxia = checkBaxiaPunish();
             if (baxia) {
-                handleBaxiaPunishDetected(baxia); // baxiaSolveMode guard prevents double-fire
-                return; // Pause normal bot flow while CAPTCHA is present
-            }
-            // If we just finished solving a captcha, reset solve mode
-            if (baxiaSolveMode) {
-                baxiaSolveMode = false;
-                baxiaClickAttempts = 0;
+                handleBaxiaPunishDetected(baxia);
+                return;
             }
 
             // Check order success page redirect
@@ -1347,234 +1128,10 @@
         }
     }
 
-    // --- MTOP API-based Stock Check (no page refresh needed) ---
-
-    // Extract item/sku/seller IDs from __moduleData__ or URL
-    function getProductIds() {
-        try {
-            const md = window.__moduleData__;
-            if (md && md.data && md.data.root && md.data.root.fields) {
-                const fields = md.data.root.fields;
-                if (fields.productOption && fields.productOption.skuBase && fields.productOption.skuBase.skus) {
-                    const sku = fields.productOption.skuBase.skus[0];
-                    if (sku) {
-                        return {
-                            itemId: sku.itemId || sku.cartItemId,
-                            skuId: sku.skuId || sku.cartSkuId,
-                            sellerId: sku.sellerId
-                        };
-                    }
-                }
-            }
-        } catch (e) {}
-
-        // Fallback: parse from URL (i<itemId>-s<skuId>)
-        const m = window.location.href.match(/i(\d+)-s(\d+)/);
-        if (m) return { itemId: m[1], skuId: m[2], sellerId: null };
-        return null;
-    }
-
-    // Track MTOP polling timer separately from reload timer
-    let mtopPollTimer = null;
-    let isMtopPolling = false;
-
-    // Parse stock status out of a MTOP getDetailInfo response
-    function parseStockFromMtopResponse(data) {
-        if (!data || !data.module) return null;
-        try {
-            const mod = typeof data.module === 'string' ? JSON.parse(data.module) : data.module;
-
-            // Check skuInfos / quantity fields
-            const fields = mod;
-            // Common paths Lazada uses:
-            const stockPaths = [
-                () => fields.skuInfos && Object.values(fields.skuInfos)[0] && Object.values(fields.skuInfos)[0].stock,
-                () => fields.skuInfos && Object.values(fields.skuInfos)[0] && Object.values(fields.skuInfos)[0].quantity,
-                () => fields.skuInfos && Object.values(fields.skuInfos)[0] && Object.values(fields.skuInfos)[0].sellableQuantity,
-                () => fields.stock,
-                () => fields.quantity,
-                () => fields.sellableQuantity,
-                () => fields.purchaseOrder && fields.purchaseOrder.stock,
-            ];
-            for (const fn of stockPaths) {
-                try { const v = fn(); if (v !== undefined && v !== null) return { quantity: v, raw: mod }; } catch (e) {}
-            }
-
-            // Check for buy button state (actionPanelInfo, addToCart)
-            const buyable = [
-                () => fields.actionPanelInfo && fields.actionPanelInfo.buyable,
-                () => fields.buyable,
-                () => fields.addToCart && fields.addToCart.quantity,
-            ];
-            for (const fn of buyable) {
-                try { const v = fn(); if (v !== undefined && v !== null) return { buyable: !!v, raw: mod }; } catch (e) {}
-            }
-
-            // If no explicit quantity, return the raw module to let DOM check handle it
-            return { raw: mod };
-        } catch (e) {
-            return null;
-        }
-    }
-
-    // Attempt to call Lazada's internal MTOP API to get stock info
-    function checkStockViaMtop(onSuccess, onFail) {
-        const Mtop = window.Mtop && window.Mtop.default;
-        if (!Mtop || typeof Mtop.request !== 'function') {
-            if (onFail) onFail('MTOP not available');
-            return;
-        }
-
-        const ids = getProductIds();
-        if (!ids || !ids.itemId) {
-            if (onFail) onFail('Could not determine item ID');
-            return;
-        }
-
-        // Build request params matching what Lazada PDP sends
-        const uri = window.location.pathname;
-        const reqData = {
-            deviceType: 'desktop',
-            path: window.location.href,
-            uri: uri,
-            requestParams: JSON.stringify({
-                itemId: ids.itemId,
-                skuId: ids.skuId,
-                sellerId: ids.sellerId
-            }),
-            headerParams: JSON.stringify({}),
-            cookieParams: JSON.stringify({}),
-        };
-
-        const mtopReq = {
-            api: 'mtop.global.detail.web.getDetailInfo',
-            v: '1.0',
-            type: 'POST',
-            needLogin: false,
-            data: reqData,
-        };
-
-        console.log('🤖 [Lazada Bot] MTOP stock check calling getDetailInfo for item', ids.itemId);
-
-        try {
-            Mtop.request(mtopReq,
-                function(res) {
-                    console.log('🤖 [Lazada Bot] MTOP response received', res);
-                    const stockInfo = parseStockFromMtopResponse(res && res.data);
-                    if (onSuccess) onSuccess(stockInfo, res);
-                },
-                function(err) {
-                    console.warn('🤖 [Lazada Bot] MTOP request failed:', err);
-                    if (onFail) onFail(err);
-                }
-            );
-        } catch (e) {
-            console.warn('🤖 [Lazada Bot] MTOP request threw:', e);
-            if (onFail) onFail(e);
-        }
-    }
-
-    // Determine in-stock status from MTOP response (with DOM fallback)
-    function evaluateStockFromMtop(stockInfo) {
-        if (!stockInfo) return null; // Unknown - use DOM
-
-        // Explicit quantity
-        if (stockInfo.quantity !== undefined) {
-            const qty = parseInt(stockInfo.quantity, 10);
-            return qty > 0;
-        }
-
-        // Explicit buyable flag
-        if (stockInfo.buyable !== undefined) {
-            return !!stockInfo.buyable;
-        }
-
-        // Got raw data but couldn't extract stock: fall back to DOM
-        return null;
-    }
-
     function runStockCheck() {
         if (!state.enabled) return;
 
-        // --- Primary: Try MTOP API (no page refresh) ---
-        const mtopAvailable = !!(window.Mtop && window.Mtop.default && typeof window.Mtop.default.request === 'function');
-
-        if (mtopAvailable && !isMtopPolling) {
-            isMtopPolling = true;
-            updateStatus('🔍 Checking stock via API...', 'info');
-
-            checkStockViaMtop(
-                function(stockInfo, rawRes) {
-                    isMtopPolling = false;
-                    if (!state.enabled) return;
-
-                    const inStock = evaluateStockFromMtop(stockInfo);
-
-                    if (inStock === true) {
-                        // Confirmed IN STOCK via API!
-                        if (mtopPollTimer) { clearInterval(mtopPollTimer); mtopPollTimer = null; }
-                        if (reloadTimer) { clearInterval(reloadTimer); reloadTimer = null; }
-                        if (checkLoopTimer) { clearInterval(checkLoopTimer); checkLoopTimer = null; }
-                        handleInStock();
-                    } else if (inStock === false) {
-                        // Confirmed OUT OF STOCK via API - schedule next API poll (no page refresh!)
-                        const qty = stockInfo && stockInfo.quantity !== undefined ? stockInfo.quantity : 0;
-                        updateStatus(`Out of Stock (API qty:${qty}). Next check in ${state.minRefresh || 3}s...`, 'warn');
-                        scheduleMtopPoll();
-                    } else {
-                        // API response unclear - fall back to DOM inspection
-                        console.log('🤖 [Lazada Bot] MTOP stock unclear, falling back to DOM check');
-                        runDomStockCheck();
-                    }
-                },
-                function(err) {
-                    isMtopPolling = false;
-                    if (!state.enabled) return;
-                    console.warn('🤖 [Lazada Bot] MTOP failed, falling back to DOM:', err);
-                    runDomStockCheck();
-                }
-            );
-        } else if (!mtopAvailable) {
-            // MTOP library not loaded yet - fall back to DOM check
-            runDomStockCheck();
-        }
-        // if isMtopPolling is true, skip this tick (already waiting for MTOP response)
-    }
-
-    function scheduleMtopPoll() {
-        if (!state.enabled) return;
-        if (mtopPollTimer) return; // Already scheduled
-
-        const min = (state.minRefresh || 3) * 1000;
-        const max = (state.maxRefresh || 7) * 1000;
-        const delay = Math.floor(Math.random() * (max - min + 1)) + min;
-
-        let countdown = Math.round(delay / 1000);
-        if (mtopPollTimer) clearInterval(mtopPollTimer);
-
-        mtopPollTimer = setInterval(() => {
-            countdown--;
-            if (!state.enabled) {
-                clearInterval(mtopPollTimer);
-                mtopPollTimer = null;
-                return;
-            }
-            if (countdown > 0) {
-                updateStatus(`Out of Stock. Next API check in ${countdown}s...`, 'warn');
-            } else {
-                clearInterval(mtopPollTimer);
-                mtopPollTimer = null;
-                if (state.enabled && !isMtopPolling) {
-                    runStockCheck();
-                }
-            }
-        }, 1000);
-    }
-
-    // DOM-based stock check (used as fallback when MTOP is unavailable)
-    function runDomStockCheck() {
-        if (!state.enabled) return;
-
+        // Check Out of stock conditions
         const isOutOfStock = checkIsOutOfStock();
         const isInStock = checkIsInStock();
 
@@ -1586,6 +1143,7 @@
                 startRefreshCountdown();
             }
         } else if (isInStock) {
+            // Cancel any ongoing reload countdown if it comes in stock dynamically
             if (reloadTimer) { clearInterval(reloadTimer); reloadTimer = null; }
             if (checkLoopTimer) { clearInterval(checkLoopTimer); checkLoopTimer = null; }
             handleInStock();
@@ -1639,18 +1197,17 @@
     }
 
     function startRefreshCountdown() {
-        updateStatus(`Out of Stock. Refreshing in ${timeUntilReload}s... (DOM fallback mode)`, 'warn');
+        updateStatus(`Out of Stock. Refreshing in ${timeUntilReload}s...`, 'warn');
 
         if (reloadTimer) clearInterval(reloadTimer);
 
         reloadTimer = setInterval(() => {
             timeUntilReload--;
             if (timeUntilReload > 0) {
-                updateStatus(`Out of Stock. Refreshing in ${timeUntilReload}s... (DOM fallback)`, 'warn');
+                updateStatus(`Out of Stock. Refreshing in ${timeUntilReload}s...`, 'warn');
             } else {
                 clearInterval(reloadTimer);
-                reloadTimer = null;
-                updateStatus('Refreshing page to check stock... (DOM fallback)', 'info');
+                updateStatus('Refreshing page to check stock...', 'info');
                 window.location.reload();
             }
         }, 1000);
