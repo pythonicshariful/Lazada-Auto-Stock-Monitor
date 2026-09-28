@@ -35,6 +35,7 @@
         cvv: '444',
         tgBotToken: '8156587833:AAEwTAIdqcTkT6U8fSj4uD49AdKklG2nfdc',
         tgChatId: '7809021498',
+        discordWebhook: '',
         lastStatus: 'Idle'
     };
 
@@ -183,6 +184,12 @@
                         <div class="bot-field-group flex-1">
                             <label for="bot-tg-chatid">TG Chat ID</label>
                             <input type="text" id="bot-tg-chatid" placeholder="Chat ID" value="${state.tgChatId || ''}">
+                        </div>
+                    </div>
+                    <div class="bot-field-row">
+                        <div class="bot-field-group flex-1">
+                            <label for="bot-discord">Discord Webhook</label>
+                            <input type="text" id="bot-discord" placeholder="https://discord.com/api/webhooks/..." value="${state.discordWebhook || ''}">
                         </div>
                     </div>
                     <div class="bot-action-row">
@@ -396,6 +403,7 @@
         const cvvInput = document.getElementById('bot-cvv');
         const tgTokenInput = document.getElementById('bot-tg-token');
         const tgChatIdInput = document.getElementById('bot-tg-chatid');
+        const discordInput = document.getElementById('bot-discord');
         const statusDot = document.querySelector('.bot-status-dot');
 
         toggleBtn.addEventListener('click', (e) => {
@@ -422,6 +430,7 @@
             state.cvv = cvvInput ? cvvInput.value.trim() : state.cvv;
             state.tgBotToken = tgTokenInput ? tgTokenInput.value.trim() : state.tgBotToken;
             state.tgChatId = tgChatIdInput ? tgChatIdInput.value.trim() : state.tgChatId;
+            state.discordWebhook = discordInput ? discordInput.value.trim() : state.discordWebhook;
             setConfig(state);
 
             startBtn.classList.add('hidden');
@@ -491,10 +500,57 @@
             state.tgChatId = tgChatIdInput.value.trim();
             setConfig(state);
         });
+        discordInput?.addEventListener('change', () => {
+            state.discordWebhook = discordInput.value.trim();
+            setConfig(state);
+        });
     }
 
-    // --- Telegram Notification ---
+    // --- Audio Notification ---
+    function playAlertSound() {
+        try {
+            const ctx = new (window.AudioContext || window.webkitAudioContext)();
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(880, ctx.currentTime);
+            osc.frequency.exponentialRampToValueAtTime(1760, ctx.currentTime + 0.1);
+            gain.gain.setValueAtTime(0, ctx.currentTime);
+            gain.gain.linearRampToValueAtTime(0.5, ctx.currentTime + 0.05);
+            gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.3);
+            osc.start(ctx.currentTime);
+            osc.stop(ctx.currentTime + 0.3);
+        } catch(e) { console.error('Audio play failed', e); }
+    }
+
+    // --- Notifications ---
     function sendTelegramNotification(message) {
+        playAlertSound();
+
+        // Discord Notification
+        if (state.discordWebhook && state.discordWebhook.trim().startsWith('http')) {
+            console.log(`🤖 [Lazada Bot] Sending Discord notification...`);
+            const payload = JSON.stringify({ content: `🔔 **Lazada Bot Alert**\n${message}` });
+            if (typeof GM_xmlhttpRequest === 'function') {
+                try {
+                    GM_xmlhttpRequest({
+                        method: 'POST',
+                        url: state.discordWebhook.trim(),
+                        headers: { "Content-Type": "application/json" },
+                        data: payload
+                    });
+                } catch(e){}
+            } else {
+                fetch(state.discordWebhook.trim(), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: payload
+                }).catch(()=>{});
+            }
+        }
+
         const token = (state.tgBotToken && state.tgBotToken.trim()) ? state.tgBotToken.trim() : defaultConfig.tgBotToken;
         const chatId = (state.tgChatId && state.tgChatId.trim()) ? state.tgChatId.trim() : defaultConfig.tgChatId;
         
@@ -503,7 +559,7 @@
             return;
         }
 
-        const encodedText = encodeURIComponent(message);
+        const encodedText = encodeURIComponent(`🔔 Lazada Bot Alert\n${message}`);
         const url = `https://api.telegram.org/bot${token}/sendMessage?chat_id=${encodeURIComponent(chatId)}&text=${encodedText}&parse_mode=HTML`;
 
         console.log(`🤖 [Lazada Bot] Sending Telegram notification to Chat ID ${chatId}...`);
@@ -1347,7 +1403,7 @@
         }
     }
 
-    // --- MTOP API-based Stock Check (no page refresh needed) ---
+    // --- Multi-Method Stock Detection (no page refresh) ---
 
     // Extract item/sku/seller IDs from __moduleData__ or URL
     function getProductIds() {
@@ -1378,11 +1434,216 @@
     let mtopPollTimer = null;
     let isMtopPolling = false;
 
+    // ── METHOD 1: Read __moduleData__ snapshot (zero-latency, no network call) ──
+    // Lazada populates window.__moduleData__ on page load with full product state.
+    // We can read it directly at any time — it reflects the current page's stock state
+    // without any HTTP request. This is the fastest and most bot-safe method.
+    function checkStockViaModuleData() {
+        try {
+            const md = window.__moduleData__;
+            if (!md || !md.data || !md.data.root || !md.data.root.fields) return null;
+            const fields = md.data.root.fields;
+
+            // Path A: productOption.skuBase.skus[].stock / quantity / sellableQuantity
+            try {
+                const skus = fields.productOption && fields.productOption.skuBase && fields.productOption.skuBase.skus;
+                if (skus && skus.length > 0) {
+                    const sku = skus[0];
+                    const qty = sku.stock !== undefined ? sku.stock
+                              : sku.quantity !== undefined ? sku.quantity
+                              : sku.sellableQuantity !== undefined ? sku.sellableQuantity
+                              : undefined;
+                    if (qty !== undefined && qty !== null) {
+                        console.log('🤖 [Lazada Bot] __moduleData__ stock (skuBase.skus[0]):', qty);
+                        return { quantity: parseInt(qty, 10), source: 'moduleData.skuBase' };
+                    }
+                }
+            } catch(e) {}
+
+            // Path B: skuInfos map
+            try {
+                if (fields.skuInfos) {
+                    const firstSku = Object.values(fields.skuInfos)[0];
+                    if (firstSku) {
+                        const qty = firstSku.stock !== undefined ? firstSku.stock
+                                  : firstSku.quantity !== undefined ? firstSku.quantity
+                                  : firstSku.sellableQuantity !== undefined ? firstSku.sellableQuantity
+                                  : undefined;
+                        if (qty !== undefined && qty !== null) {
+                            console.log('🤖 [Lazada Bot] __moduleData__ stock (skuInfos[0]):', qty);
+                            return { quantity: parseInt(qty, 10), source: 'moduleData.skuInfos' };
+                        }
+                    }
+                }
+            } catch(e) {}
+
+            // Path C: actionPanelInfo.buyable or top-level buyable
+            try {
+                const buyable = (fields.actionPanelInfo && fields.actionPanelInfo.buyable !== undefined)
+                    ? fields.actionPanelInfo.buyable
+                    : fields.buyable;
+                if (buyable !== undefined && buyable !== null) {
+                    console.log('🤖 [Lazada Bot] __moduleData__ buyable flag:', buyable);
+                    return { buyable: !!buyable, source: 'moduleData.buyable' };
+                }
+            } catch(e) {}
+
+            // Path D: addToCart.stock or addToCart.quantity
+            try {
+                if (fields.addToCart) {
+                    const ac = fields.addToCart;
+                    const qty = ac.stock !== undefined ? ac.stock : ac.quantity !== undefined ? ac.quantity : undefined;
+                    if (qty !== undefined) {
+                        console.log('🤖 [Lazada Bot] __moduleData__ stock (addToCart):', qty);
+                        return { quantity: parseInt(qty, 10), source: 'moduleData.addToCart' };
+                    }
+                }
+            } catch(e) {}
+
+        } catch(e) { console.warn('🤖 [Lazada Bot] __moduleData__ read error:', e); }
+        return null; // Unknown - use other methods
+    }
+
+    // ── METHOD 2: Raw fetch-based MTOP API call ──
+    // Mimics the exact XHR Lazada's own JavaScript makes, using the _m_h5_tk cookie
+    // for signature. This is indistinguishable from a real browser interaction.
+    function getMtopToken() {
+        // Read _m_h5_tk from cookies (format: TOKEN_VALUE&timestamp)
+        const match = document.cookie.match(/_m_h5_tk=([^;]+)/);
+        if (!match) return null;
+        return decodeURIComponent(match[1]).split('_')[0];
+    }
+
+    function getMtopAppKey() {
+        // Lazada SG desktop app key — extract from __globalConfig__ or use the known value
+        try {
+            if (window.__globalConfig__ && window.__globalConfig__.mtopAppKey) {
+                return window.__globalConfig__.mtopAppKey;
+            }
+        } catch(e) {}
+        return '12574478'; // Lazada SG web desktop app key
+    }
+
+    async function md5Hex(str) {
+        // Lightweight MD5 for MTOP token signing (TextEncoder + SubtleCrypto)
+        // Note: SubtleCrypto only supports SHA-*, not MD5, so we use a minimal
+        // pure-JS MD5 implementation embedded here.
+        const s = str;
+        function safeAdd(x, y) { const lsw=(x&0xFFFF)+(y&0xFFFF); const msw=(x>>16)+(y>>16)+(lsw>>16); return (msw<<16)|(lsw&0xFFFF); }
+        function bitRotateLeft(num, cnt) { return (num<<cnt)|(num>>>(32-cnt)); }
+        function md5cmn(q,a,b,x,s,t) { return safeAdd(bitRotateLeft(safeAdd(safeAdd(a,q),safeAdd(x,t)),s),b); }
+        function md5ff(a,b,c,d,x,s,t){return md5cmn((b&c)|((~b)&d),a,b,x,s,t);}
+        function md5gg(a,b,c,d,x,s,t){return md5cmn((b&d)|(c&(~d)),a,b,x,s,t);}
+        function md5hh(a,b,c,d,x,s,t){return md5cmn(b^c^d,a,b,x,s,t);}
+        function md5ii(a,b,c,d,x,s,t){return md5cmn(c^(b|(~d)),a,b,x,s,t);}
+        function calcMD5(str){
+            let i; const x=unescape(encodeURIComponent(str)); const l=x.length;
+            const wordArray=[]; for(i=0;i<l;i+=4){wordArray[i>>2]|=x.charCodeAt(i)<<((i%4)*8);}
+            wordArray[l>>2]|=0x80<<((l%4)*8); wordArray[((l+64>>>9)<<4)+14]=l*8;
+            let a=1732584193,b=-271733879,c=-1732584194,d=271733878;
+            for(i=0;i<wordArray.length;i+=16){
+                let [ta,tb,tc,td]=[a,b,c,d];
+                a=md5ff(a,b,c,d,wordArray[i+0],7,-680876936);d=md5ff(d,a,b,c,wordArray[i+1],12,-389564586);c=md5ff(c,d,a,b,wordArray[i+2],17,606105819);b=md5ff(b,c,d,a,wordArray[i+3],22,-1044525330);
+                a=md5ff(a,b,c,d,wordArray[i+4],7,-176418897);d=md5ff(d,a,b,c,wordArray[i+5],12,1200080426);c=md5ff(c,d,a,b,wordArray[i+6],17,-1473231341);b=md5ff(b,c,d,a,wordArray[i+7],22,-45705983);
+                a=md5ff(a,b,c,d,wordArray[i+8],7,1770035416);d=md5ff(d,a,b,c,wordArray[i+9],12,-1958414417);c=md5ff(c,d,a,b,wordArray[i+10],17,-42063);b=md5ff(b,c,d,a,wordArray[i+11],22,-1990404162);
+                a=md5ff(a,b,c,d,wordArray[i+12],7,1804603682);d=md5ff(d,a,b,c,wordArray[i+13],12,-40341101);c=md5ff(c,d,a,b,wordArray[i+14],17,-1502002290);b=md5ff(b,c,d,a,wordArray[i+15],22,1236535329);
+                a=md5gg(a,b,c,d,wordArray[i+1],5,-165796510);d=md5gg(d,a,b,c,wordArray[i+6],9,-1069501632);c=md5gg(c,d,a,b,wordArray[i+11],14,643717713);b=md5gg(b,c,d,a,wordArray[i+0],20,-373897302);
+                a=md5gg(a,b,c,d,wordArray[i+5],5,-701558691);d=md5gg(d,a,b,c,wordArray[i+10],9,38016083);c=md5gg(c,d,a,b,wordArray[i+15],14,-660478335);b=md5gg(b,c,d,a,wordArray[i+4],20,-405537848);
+                a=md5gg(a,b,c,d,wordArray[i+9],5,568446438);d=md5gg(d,a,b,c,wordArray[i+14],9,-1019803690);c=md5gg(c,d,a,b,wordArray[i+3],14,-187363961);b=md5gg(b,c,d,a,wordArray[i+8],20,1163531501);
+                a=md5gg(a,b,c,d,wordArray[i+13],5,-1444681467);d=md5gg(d,a,b,c,wordArray[i+2],9,-51403784);c=md5gg(c,d,a,b,wordArray[i+7],14,1735328473);b=md5gg(b,c,d,a,wordArray[i+12],20,-1926607734);
+                a=md5hh(a,b,c,d,wordArray[i+5],4,-378558);d=md5hh(d,a,b,c,wordArray[i+8],11,-2022574463);c=md5hh(c,d,a,b,wordArray[i+11],16,1839030562);b=md5hh(b,c,d,a,wordArray[i+14],23,-35309556);
+                a=md5hh(a,b,c,d,wordArray[i+1],4,-1530992060);d=md5hh(d,a,b,c,wordArray[i+4],11,1272893353);c=md5hh(c,d,a,b,wordArray[i+7],16,-155497632);b=md5hh(b,c,d,a,wordArray[i+10],23,-1094730640);
+                a=md5hh(a,b,c,d,wordArray[i+13],4,681279174);d=md5hh(d,a,b,c,wordArray[i+0],11,-358537222);c=md5hh(c,d,a,b,wordArray[i+3],16,-722521979);b=md5hh(b,c,d,a,wordArray[i+6],23,76029189);
+                a=md5hh(a,b,c,d,wordArray[i+9],4,-640364487);d=md5hh(d,a,b,c,wordArray[i+12],11,-421815835);c=md5hh(c,d,a,b,wordArray[i+15],16,530742520);b=md5hh(b,c,d,a,wordArray[i+2],23,-995338651);
+                a=md5ii(a,b,c,d,wordArray[i+0],6,-198630844);d=md5ii(d,a,b,c,wordArray[i+7],10,1126891415);c=md5ii(c,d,a,b,wordArray[i+14],15,-1416354905);b=md5ii(b,c,d,a,wordArray[i+5],21,-57434055);
+                a=md5ii(a,b,c,d,wordArray[i+12],6,1700485571);d=md5ii(d,a,b,c,wordArray[i+3],10,-1894986606);c=md5ii(c,d,a,b,wordArray[i+10],15,-1051523);b=md5ii(b,c,d,a,wordArray[i+1],21,-2054922799);
+                a=md5ii(a,b,c,d,wordArray[i+8],6,1873313359);d=md5ii(d,a,b,c,wordArray[i+15],10,-30611744);c=md5ii(c,d,a,b,wordArray[i+6],15,-1560198380);b=md5ii(b,c,d,a,wordArray[i+13],21,1309151649);
+                a=md5ii(a,b,c,d,wordArray[i+4],6,-145523070);d=md5ii(d,a,b,c,wordArray[i+11],10,-1120210379);c=md5ii(c,d,a,b,wordArray[i+2],15,718787259);b=md5ii(b,c,d,a,wordArray[i+9],21,-343485551);
+                a=safeAdd(a,ta);b=safeAdd(b,tb);c=safeAdd(c,tc);d=safeAdd(d,td);
+            }
+            return [a,b,c,d].map(n=>{ let h=''; for(let j=0;j<4;j++){h+=('0'+((n>>>(j*8))&0xFF).toString(16)).slice(-2);} return h; }).join('');
+        }
+        return calcMD5(str);
+    }
+
+    async function checkStockViaFetchMtop(onSuccess, onFail) {
+        const ids = getProductIds();
+        if (!ids || !ids.itemId) { if (onFail) onFail('No item ID'); return; }
+
+        const token = getMtopToken();
+        const appKey = getMtopAppKey();
+        const t = String(Date.now());
+        const api = 'mtop.global.detail.web.getDetailInfo';
+        const v = '1.0';
+
+        const dataObj = {
+            deviceType: 'desktop',
+            path: window.location.href,
+            uri: window.location.pathname,
+            requestParams: JSON.stringify({
+                itemId: ids.itemId,
+                skuId: ids.skuId || '',
+                sellerId: ids.sellerId || ''
+            }),
+            headerParams: '{}',
+            cookieParams: '{}'
+        };
+        const dataStr = JSON.stringify(dataObj);
+
+        // Sign: md5(token + '&' + t + '&' + appKey + '&' + dataStr)
+        const signInput = (token ? token + '&' : '') + t + '&' + appKey + '&' + dataStr;
+        const sign = await md5Hex(signInput);
+
+        const params = new URLSearchParams({
+            jsv: '2.7.2',
+            appKey: appKey,
+            t: t,
+            sign: sign,
+            api: api,
+            v: v,
+            type: 'originaljson',
+            dataType: 'jsonp',
+            AntiCreep: 'true',
+            AntiFlood: 'true',
+            callback: 'mtopjsonp' + Math.floor(Math.random() * 1e8)
+        });
+
+        const url = `https://acs.m.sg.lazada.com/h5/${api}/${v}/?${params.toString()}`;
+
+        console.log('🤖 [Lazada Bot] Fetch MTOP API call for item', ids.itemId);
+
+        try {
+            const resp = await fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'Referer': window.location.href,
+                    'Origin': window.location.origin,
+                },
+                body: 'data=' + encodeURIComponent(dataStr),
+                credentials: 'include'
+            });
+            let text = await resp.text();
+            // Strip JSONP wrapper if present
+            text = text.replace(/^[^(]+\(/, '').replace(/\);?$/, '');
+            const json = JSON.parse(text);
+            console.log('🤖 [Lazada Bot] Fetch MTOP response:', json);
+            const stockInfo = parseStockFromMtopResponse(json && json.data);
+            if (onSuccess) onSuccess(stockInfo, json);
+        } catch(e) {
+            console.warn('🤖 [Lazada Bot] Fetch MTOP failed:', e);
+            if (onFail) onFail(e);
+        }
+    }
+
     // Parse stock status out of a MTOP getDetailInfo response
     function parseStockFromMtopResponse(data) {
-        if (!data || !data.module) return null;
+        if (!data) return null;
         try {
-            const mod = typeof data.module === 'string' ? JSON.parse(data.module) : data.module;
+            let mod = data;
+            if (data.module) {
+                mod = typeof data.module === 'string' ? JSON.parse(data.module) : data.module;
+            }
 
             // Check skuInfos / quantity fields
             const fields = mod;
@@ -1417,7 +1678,7 @@
         }
     }
 
-    // Attempt to call Lazada's internal MTOP API to get stock info
+    // ── METHOD 3: window.Mtop SDK (existing method, kept as tertiary fallback) ──
     function checkStockViaMtop(onSuccess, onFail) {
         const Mtop = window.Mtop && window.Mtop.default;
         if (!Mtop || typeof Mtop.request !== 'function') {
@@ -1454,27 +1715,27 @@
             data: reqData,
         };
 
-        console.log('🤖 [Lazada Bot] MTOP stock check calling getDetailInfo for item', ids.itemId);
+        console.log('🤖 [Lazada Bot] MTOP SDK stock check for item', ids.itemId);
 
         try {
             Mtop.request(mtopReq,
                 function(res) {
-                    console.log('🤖 [Lazada Bot] MTOP response received', res);
+                    console.log('🤖 [Lazada Bot] MTOP SDK response received', res);
                     const stockInfo = parseStockFromMtopResponse(res && res.data);
                     if (onSuccess) onSuccess(stockInfo, res);
                 },
                 function(err) {
-                    console.warn('🤖 [Lazada Bot] MTOP request failed:', err);
+                    console.warn('🤖 [Lazada Bot] MTOP SDK request failed:', err);
                     if (onFail) onFail(err);
                 }
             );
         } catch (e) {
-            console.warn('🤖 [Lazada Bot] MTOP request threw:', e);
+            console.warn('🤖 [Lazada Bot] MTOP SDK threw:', e);
             if (onFail) onFail(e);
         }
     }
 
-    // Determine in-stock status from MTOP response (with DOM fallback)
+    // Determine in-stock status from any stock info object
     function evaluateStockFromMtop(stockInfo) {
         if (!stockInfo) return null; // Unknown - use DOM
 
@@ -1495,50 +1756,97 @@
 
     function runStockCheck() {
         if (!state.enabled) return;
+        if (isMtopPolling) return; // Already polling, skip tick
 
-        // --- Primary: Try MTOP API (no page refresh) ---
+        // ── STEP 1: Try __moduleData__ snapshot (instant, zero network cost) ──
+        const mdInfo = checkStockViaModuleData();
+        if (mdInfo !== null) {
+            const inStock = evaluateStockFromMtop(mdInfo);
+            if (inStock === true) {
+                updateStatus(`📦 IN STOCK (${mdInfo.source})! Taking action...`, 'success');
+                if (mtopPollTimer) { clearInterval(mtopPollTimer); mtopPollTimer = null; }
+                if (reloadTimer) { clearInterval(reloadTimer); reloadTimer = null; }
+                if (checkLoopTimer) { clearInterval(checkLoopTimer); checkLoopTimer = null; }
+                handleInStock();
+                return;
+            } else if (inStock === false) {
+                const qty = mdInfo.quantity !== undefined ? mdInfo.quantity : 0;
+                updateStatus(`Out of Stock (snapshot qty:${qty}). Waiting for API confirmation...`, 'warn');
+                // Fall through to API confirmation — moduleData may be stale
+            }
+            // inStock===null means ambiguous, also fall through to API
+        }
+
+        // ── STEP 2: Fetch-based MTOP API (mimics real browser, no Mtop SDK needed) ──
+        isMtopPolling = true;
+        updateStatus('🔍 Checking stock via API (fetch)...', 'info');
+
+        checkStockViaFetchMtop(
+            function(stockInfo, rawRes) {
+                isMtopPolling = false;
+                if (!state.enabled) return;
+
+                const inStock = evaluateStockFromMtop(stockInfo);
+
+                if (inStock === true) {
+                    if (mtopPollTimer) { clearInterval(mtopPollTimer); mtopPollTimer = null; }
+                    if (reloadTimer) { clearInterval(reloadTimer); reloadTimer = null; }
+                    if (checkLoopTimer) { clearInterval(checkLoopTimer); checkLoopTimer = null; }
+                    handleInStock();
+                } else if (inStock === false) {
+                    const qty = stockInfo && stockInfo.quantity !== undefined ? stockInfo.quantity : 0;
+                    updateStatus(`Out of Stock (API qty:${qty}). Next check in ${state.minRefresh || 3}s...`, 'warn');
+                    scheduleMtopPoll();
+                } else {
+                    // Fetch API unclear - try window.Mtop SDK
+                    console.log('🤖 [Lazada Bot] Fetch MTOP unclear, trying SDK...');
+                    tryMtopSdkOrDom();
+                }
+            },
+            function(err) {
+                isMtopPolling = false;
+                if (!state.enabled) return;
+                console.warn('🤖 [Lazada Bot] Fetch MTOP failed, trying SDK:', err);
+                tryMtopSdkOrDom();
+            }
+        );
+    }
+
+    // ── STEP 3: Try window.Mtop SDK, then DOM fallback ──
+    function tryMtopSdkOrDom() {
+        if (!state.enabled) return;
         const mtopAvailable = !!(window.Mtop && window.Mtop.default && typeof window.Mtop.default.request === 'function');
 
-        if (mtopAvailable && !isMtopPolling) {
+        if (mtopAvailable) {
             isMtopPolling = true;
-            updateStatus('🔍 Checking stock via API...', 'info');
-
+            updateStatus('🔍 Checking stock via MTOP SDK...', 'info');
             checkStockViaMtop(
                 function(stockInfo, rawRes) {
                     isMtopPolling = false;
                     if (!state.enabled) return;
-
                     const inStock = evaluateStockFromMtop(stockInfo);
-
                     if (inStock === true) {
-                        // Confirmed IN STOCK via API!
                         if (mtopPollTimer) { clearInterval(mtopPollTimer); mtopPollTimer = null; }
                         if (reloadTimer) { clearInterval(reloadTimer); reloadTimer = null; }
                         if (checkLoopTimer) { clearInterval(checkLoopTimer); checkLoopTimer = null; }
                         handleInStock();
                     } else if (inStock === false) {
-                        // Confirmed OUT OF STOCK via API - schedule next API poll (no page refresh!)
                         const qty = stockInfo && stockInfo.quantity !== undefined ? stockInfo.quantity : 0;
-                        updateStatus(`Out of Stock (API qty:${qty}). Next check in ${state.minRefresh || 3}s...`, 'warn');
+                        updateStatus(`Out of Stock (SDK qty:${qty}). Next check in ${state.minRefresh || 3}s...`, 'warn');
                         scheduleMtopPoll();
                     } else {
-                        // API response unclear - fall back to DOM inspection
-                        console.log('🤖 [Lazada Bot] MTOP stock unclear, falling back to DOM check');
                         runDomStockCheck();
                     }
                 },
                 function(err) {
                     isMtopPolling = false;
                     if (!state.enabled) return;
-                    console.warn('🤖 [Lazada Bot] MTOP failed, falling back to DOM:', err);
                     runDomStockCheck();
                 }
             );
-        } else if (!mtopAvailable) {
-            // MTOP library not loaded yet - fall back to DOM check
+        } else {
             runDomStockCheck();
         }
-        // if isMtopPolling is true, skip this tick (already waiting for MTOP response)
     }
 
     function scheduleMtopPoll() {
@@ -1547,7 +1855,9 @@
 
         const min = (state.minRefresh || 3) * 1000;
         const max = (state.maxRefresh || 7) * 1000;
-        const delay = Math.floor(Math.random() * (max - min + 1)) + min;
+        // Human-like jitter: add 200-800ms extra randomness to avoid predictable intervals
+        const jitter = Math.floor(Math.random() * 600) + 200;
+        const delay = Math.floor(Math.random() * (max - min + 1)) + min + jitter;
 
         let countdown = Math.round(delay / 1000);
         if (mtopPollTimer) clearInterval(mtopPollTimer);
@@ -1593,11 +1903,27 @@
     }
 
     function checkIsInStock() {
+        // Signal 1: Buy Now button visible and enabled (confirmed in-stock from live inspection)
         const buyNowBtn = document.querySelector('.add-to-cart-buy-now-btn, button.add-to-cart-buy-now-btn');
-        if (buyNowBtn && !buyNowBtn.disabled && !buyNowBtn.classList.contains('disabled')) {
+        if (buyNowBtn && !buyNowBtn.disabled && !buyNowBtn.classList.contains('disabled') && buyNowBtn.offsetWidth > 0) {
             return true;
         }
-        
+
+        // Signal 2: Add to Cart button visible and enabled
+        const addToCartBtn = document.querySelector(
+            'button[data-spm*="cart"], .btn-add-to-cart button:not([disabled]), .add-to-cart-button button:not([disabled])');
+        if (addToCartBtn && !addToCartBtn.disabled && addToCartBtn.offsetWidth > 0) {
+            return true;
+        }
+
+        // Signal 3: Quantity input is enabled with value > 0
+        const qtyInput = document.querySelector('.next-number-picker-input input');
+        if (qtyInput && !qtyInput.disabled) {
+            const v = parseInt(qtyInput.value, 10);
+            if (!isNaN(v) && v > 0) return true;
+        }
+
+        // Signal 4: RedMart Add to Cart
         const redMartAddToCartBtn = document.querySelector('.pdp-redmart-add-to-cart button, .redmart-cart-btn button');
         if (redMartAddToCartBtn && !redMartAddToCartBtn.disabled) {
             return true;
@@ -1607,56 +1933,84 @@
     }
 
     function checkIsOutOfStock() {
-        // Selector 1: Quantity warning text
+        // Signal 1 (strongest): "Add to Wishlist" button is the ONLY action button
+        // — confirmed from live OOS page inspection. When OOS, Buy Now/Add to Cart disappear
+        // and are replaced by a single "Add to Wishlist" button.
+        const wishlistBtn = document.querySelector('.pdp-button-block-wishlist, button[class*="wishlist"]');
+        const buyNowBtn = document.querySelector('.add-to-cart-buy-now-btn, button.add-to-cart-buy-now-btn');
+        if (wishlistBtn && wishlistBtn.offsetWidth > 0 && (!buyNowBtn || buyNowBtn.offsetWidth === 0)) {
+            return true;
+        }
+
+        // Signal 2: Quantity shows 0 AND "Out of stock" text appears next to input
+        // (confirmed live: qty=0, then "Out of stock" text in red next to the stepper)
+        const qtyInput = document.querySelector('.next-number-picker-input input');
+        if (qtyInput) {
+            const v = parseInt(qtyInput.value, 10);
+            if (!isNaN(v) && v === 0) {
+                // Confirm with nearby OOS text
+                const qtyArea = qtyInput.closest('.quantity-content, .product-quantity, [class*="quantity"]');
+                const areaText = (qtyArea ? qtyArea.innerText : document.body.innerText) || '';
+                if (areaText.toLowerCase().includes('out of stock')) return true;
+            }
+        }
+
+        // Signal 3: Quantity warning element with OOS text
         const warningEl = document.querySelector('.quantity-content-warning');
         if (warningEl && warningEl.textContent.toLowerCase().includes('out of stock')) {
             return true;
         }
 
-        // Selector 2: Number picker disabled class or disabled input
-        const pickerDisabled = document.querySelector('.next-number-picker-disabled');
-        if (pickerDisabled) return true;
-
+        // Signal 4: Quantity input is explicitly disabled
         const qtyInputDisabled = document.querySelector('.next-number-picker-input input[disabled]');
         if (qtyInputDisabled) return true;
 
-        // Selector 3: Out of stock buy button disabled state or text
-        const buyNowBtn = document.querySelector('.add-to-cart-buy-now-btn, button.add-to-cart-buy-now-btn');
+        // Signal 5: Buy Now button explicitly disabled
         if (buyNowBtn && (buyNowBtn.disabled || buyNowBtn.classList.contains('disabled'))) {
             return true;
-        }
-
-        // Check for general page text
-        const bodyText = document.body.innerText || '';
-        if (bodyText.includes('This item is out of stock') || bodyText.includes('Out of stock')) {
-            const qtyInput = document.querySelector('.next-number-picker-input input');
-            if (!qtyInput || qtyInput.disabled) {
-                return true;
-            }
         }
 
         return false;
     }
 
+    // DOM fallback: schedule a re-poll without page reload
     function startRefreshCountdown() {
-        updateStatus(`Out of Stock. Refreshing in ${timeUntilReload}s... (DOM fallback mode)`, 'warn');
-
         if (reloadTimer) clearInterval(reloadTimer);
+
+        const min = (state.minRefresh || 3) * 1000;
+        const max = (state.maxRefresh || 7) * 1000;
+        // Add human-like jitter (200-800ms extra)
+        const jitter = Math.floor(Math.random() * 600) + 200;
+        timeUntilReload = Math.round((Math.floor(Math.random() * (max - min + 1)) + min + jitter) / 1000);
+
+        updateStatus(`Out of Stock. Re-checking in ${timeUntilReload}s... (DOM mode)`, 'warn');
 
         reloadTimer = setInterval(() => {
             timeUntilReload--;
             if (timeUntilReload > 0) {
-                updateStatus(`Out of Stock. Refreshing in ${timeUntilReload}s... (DOM fallback)`, 'warn');
+                updateStatus(`Out of Stock. Re-checking in ${timeUntilReload}s... (DOM mode)`, 'warn');
             } else {
                 clearInterval(reloadTimer);
                 reloadTimer = null;
-                updateStatus('Refreshing page to check stock... (DOM fallback)', 'info');
-                window.location.reload();
+                // Re-check DOM + API — NO page reload! Page reloads are a bot signal.
+                updateStatus('🔍 Re-checking stock (DOM mode)...', 'info');
+                runStockCheck();
             }
         }, 1000);
     }
 
     function handleInStock() {
+        updateStatus('📦 IN STOCK! Taking action...', 'info');
+
+        // Check if front-end actually shows it
+        if (!checkIsInStock()) {
+            updateStatus('📦 IN STOCK (API) but front-end not ready. Waiting & Refreshing...', 'warn');
+            setTimeout(() => {
+                window.location.reload();
+            }, 1000 + Math.random() * 500); // Wait a little and refresh
+            return; // Don't proceed to click if not on DOM
+        }
+
         updateStatus('📦 IN STOCK! Setting quantity...', 'info');
 
         // Locate input field
