@@ -27,8 +27,8 @@
     const defaultConfig = {
         enabled: false,
         quantity: 1,
-        minRefresh: 3, // min random refresh in seconds
-        maxRefresh: 7, // max random refresh in seconds
+        minRefresh: 8, // min random refresh in seconds
+        maxRefresh: 15, // max random refresh in seconds
         cardNumber: '3746 7590 3972 476',
         cardName: 'Shariful Islam',
         expiryDate: '11/27',
@@ -1287,7 +1287,7 @@
 
         setTimeout(() => {
             clickConfirmPaymentButton();
-        }, 600);
+        }, 200);
     }
 
     let isConfirmClickScheduled = false;
@@ -1363,25 +1363,16 @@
         if (confirmBtn) {
             if (isConfirmClickScheduled) return;
             
-            const randomDelay = Math.floor(Math.random() * (1500 - 500 + 1)) + 500;
-            let timeLeft = randomDelay;
             isConfirmClickScheduled = true;
+            updateStatus('⏳ Clicking Confirm shortly...', 'info');
             
-            updateStatus(`⏳ Next click in ${timeLeft}ms...`, 'info');
-            
-            const countInterval = setInterval(() => {
-                timeLeft -= 100;
-                if (timeLeft > 0) {
-                    updateStatus(`⏳ Next click in ${timeLeft}ms...`, 'info');
-                } else {
-                    clearInterval(countInterval);
-                    isConfirmClickScheduled = false;
-                    if (!state.enabled) return;
-                    
-                    triggerClick(confirmBtn);
-                    updateStatus('🚀 CLICKED CONFIRM! Processing...', 'success');
-                }
-            }, 100);
+            setTimeout(() => {
+                isConfirmClickScheduled = false;
+                if (!state.enabled) return;
+                
+                triggerClick(confirmBtn);
+                updateStatus('🚀 CLICKED CONFIRM! Processing...', 'success');
+            }, 150);
         } else if (attempts < 15) {
             updateStatus('Confirm button inside payment panel not clickable yet, retrying...', 'warn');
             setTimeout(() => clickConfirmPaymentButton(attempts + 1), 400);
@@ -1973,28 +1964,28 @@
         return false;
     }
 
-    // DOM fallback: schedule a re-poll without page reload
+    // DOM fallback: schedule a re-poll with a page reload
     function startRefreshCountdown() {
         if (reloadTimer) clearInterval(reloadTimer);
 
-        const min = (state.minRefresh || 3) * 1000;
-        const max = (state.maxRefresh || 7) * 1000;
+        const min = (state.minRefresh || 8) * 1000;
+        const max = (state.maxRefresh || 15) * 1000;
         // Add human-like jitter (200-800ms extra)
         const jitter = Math.floor(Math.random() * 600) + 200;
         timeUntilReload = Math.round((Math.floor(Math.random() * (max - min + 1)) + min + jitter) / 1000);
 
-        updateStatus(`Out of Stock. Re-checking in ${timeUntilReload}s... (DOM mode)`, 'warn');
+        updateStatus(`Out of Stock. Reloading page in ${timeUntilReload}s...`, 'warn');
 
         reloadTimer = setInterval(() => {
             timeUntilReload--;
             if (timeUntilReload > 0) {
-                updateStatus(`Out of Stock. Re-checking in ${timeUntilReload}s... (DOM mode)`, 'warn');
+                updateStatus(`Out of Stock. Reloading page in ${timeUntilReload}s...`, 'warn');
             } else {
                 clearInterval(reloadTimer);
                 reloadTimer = null;
-                // Re-check DOM + API — NO page reload! Page reloads are a bot signal.
-                updateStatus('🔍 Re-checking stock (DOM mode)...', 'info');
-                runStockCheck();
+                // Force a page reload to get fresh DOM and moduleData since we are stuck
+                updateStatus('🔄 Reloading page to check live stock...', 'info');
+                window.location.reload();
             }
         }, 1000);
     }
@@ -2157,12 +2148,16 @@
         if (buyNowBtn && !buyNowBtn.disabled) {
             updateStatus('🚀 Clicking BUY NOW...', 'success');
             buyNowBtn.click();
-            monitorCheckoutNavigation();
+            setTimeout(() => {
+                monitorCheckoutNavigation();
+            }, 800); // Wait a little delay after add to cart
         } else if (orderTotalBtn && !orderTotalBtn.disabled) {
             // Fallback for RedMart Check Out button
             updateStatus('🚀 Clicking Check Out...', 'success');
             orderTotalBtn.click();
-            monitorCheckoutNavigation();
+            setTimeout(() => {
+                monitorCheckoutNavigation();
+            }, 800); // Wait a little delay after add to cart
         } else {
             updateStatus('Buy Now button not clickable yet. Retrying...', 'warn');
             setTimeout(clickBuyNow, 500);
