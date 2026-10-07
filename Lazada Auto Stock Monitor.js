@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Lazada Auto Stock Monitor & Quick Buy Bot
 // @namespace    http://tampermonkey.net/
-// @version      1.3
+// @version      1.5.1
 // @description  Automated stock checker using Lazada's internal MTOP API (no page refresh = anti-bot safe), with DOM fallback. Includes quantity selector and Buy Now trigger with modern GUI.
 // @author       Pythonic Shariful
 // @match        https://*.lazada.sg/*
@@ -13,13 +13,21 @@
 // @match        http://*.lazada.com/*
 // @match        http://lazada.sg/*
 // @grant        GM_xmlhttpRequest
+// @grant        unsafeWindow
+// @connect      discord.com
+// @connect      discordapp.com
+// @connect      api.telegram.org
 // @run-at       document-end
 // ==/UserScript==
 
 (function () {
     'use strict';
 
-    console.log('🤖 [Lazada Bot] Script loaded and running!');
+    // With @grant enabled, Tampermonkey runs us in a sandbox where page globals
+    // (__moduleData__, Mtop, __globalConfig__) are NOT visible on `window`. Read them from the real page window.
+    const PAGE = (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window;
+
+    console.log('🤖 [Lazada Bot] Script loaded and running! v1.5.1 (multi-variant)');
 
     // Default configuration & State Keys
     const STORAGE_KEY = 'lazada_bot_config';
@@ -192,6 +200,7 @@
                             <input type="text" id="bot-discord" placeholder="https://discord.com/api/webhooks/..." value="${state.discordWebhook || ''}">
                         </div>
                     </div>
+                    <div id="bot-variants" class="bot-variants hidden"></div>
                     <div class="bot-action-row">
                         <button type="button" id="bot-start-btn" class="bot-btn bot-btn-primary ${state.enabled ? 'hidden' : ''}">▶ Start Bot</button>
                         <button type="button" id="bot-stop-btn" class="bot-btn bot-btn-danger ${!state.enabled ? 'hidden' : ''}">⏹ Stop Bot</button>
@@ -216,6 +225,11 @@
             addStyles();
         }
         bindUIEvents();
+
+        // Show the variant panel on multi-variant product pages (reads page data only, no network).
+        // Retry a few times because Lazada renders the SKU selector asynchronously.
+        lastVariantRenderSig = '';
+        [500, 1500, 3000, 6000].forEach(t => setTimeout(refreshVariantPanel, t));
     }
 
     function addStyles() {
@@ -352,6 +366,66 @@
             .bot-btn-danger:hover {
                 background: linear-gradient(135deg, #b91c1c, #991b1b);
             }
+            .bot-variants {
+                background: rgba(30, 41, 59, 0.45);
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                border-radius: 8px;
+                padding: 8px 10px;
+            }
+            .bot-variants-head {
+                display: flex;
+                justify-content: space-between;
+                font-size: 11px;
+                font-weight: 700;
+                color: #94a3b8;
+                text-transform: uppercase;
+                letter-spacing: 0.5px;
+                margin-bottom: 6px;
+            }
+            .bot-variants-hint {
+                font-weight: 500;
+                text-transform: none;
+                color: #64748b;
+            }
+            .bot-variants-list {
+                max-height: 160px;
+                overflow-y: auto;
+                display: flex;
+                flex-direction: column;
+                gap: 4px;
+            }
+            .bot-variant-row {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                font-size: 12px;
+            }
+            .bot-variant-name {
+                flex: 1;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+            .bot-badge {
+                min-width: 22px;
+                text-align: center;
+                border-radius: 10px;
+                padding: 1px 6px;
+                font-size: 10px;
+                font-weight: 700;
+            }
+            .bot-badge-in { background: rgba(34, 197, 94, 0.2); color: #4ade80; }
+            .bot-badge-out { background: rgba(239, 68, 68, 0.15); color: #f87171; }
+            .bot-badge-unknown { background: rgba(148, 163, 184, 0.15); color: #94a3b8; }
+            .bot-variant-move {
+                background: transparent;
+                border: none;
+                color: #94a3b8;
+                cursor: pointer;
+                font-size: 10px;
+                padding: 0 2px;
+            }
+            .bot-variant-move:disabled { opacity: 0.25; cursor: default; }
             .hidden { display: none !important; }
             .bot-status-box {
                 background: rgba(15, 23, 42, 0.7);
@@ -437,7 +511,11 @@
             stopBtn.classList.remove('hidden');
             if (statusDot) statusDot.classList.add('active');
 
-            updateStatus('Bot started. Checking navigation...', 'info');
+            if (minVal < 3) {
+                updateStatus('⚠️ Bot started. Refresh under 3s may trigger more CAPTCHAs.', 'warn');
+            } else {
+                updateStatus('Bot started. Checking navigation...', 'info');
+            }
             checkAndRunBot();
         });
 
@@ -504,6 +582,34 @@
             state.discordWebhook = discordInput.value.trim();
             setConfig(state);
         });
+
+        // Variant watch list / priority (event delegation - panel content is re-rendered)
+        const variantsBox = document.getElementById('bot-variants');
+        variantsBox?.addEventListener('click', (e) => {
+            const row = e.target.closest('.bot-variant-row');
+            if (!row || !currentVariants.length) return;
+            const key = row.dataset.key;
+            const itemId = variantItemId(currentVariants);
+            const prefs = getVariantPrefs(itemId);
+
+            if (e.target.classList.contains('bot-variant-watch')) {
+                prefs.unwatched = e.target.checked
+                    ? prefs.unwatched.filter(id => id !== key)
+                    : Array.from(new Set([...prefs.unwatched, key]));
+            } else if (e.target.classList.contains('bot-variant-move')) {
+                const order = sortVariantsByPriority(currentVariants, prefs).map(v => v.key);
+                const i = order.indexOf(key);
+                const j = i + parseInt(e.target.dataset.dir, 10);
+                if (i < 0 || j < 0 || j >= order.length) return;
+                [order[i], order[j]] = [order[j], order[i]];
+                prefs.order = order;
+            } else {
+                return;
+            }
+            saveVariantPrefs(itemId, prefs);
+            lastVariantRenderSig = '';
+            renderVariantPanel(currentVariants);
+        });
     }
 
     // --- Audio Notification ---
@@ -526,30 +632,81 @@
     }
 
     // --- Notifications ---
-    function sendTelegramNotification(message) {
-        playAlertSound();
+    const NOTIFY_COLORS = {
+        info: 0x38bdf8,
+        success: 0x22c55e,
+        warn: 0xf59e0b,
+        error: 0xef4444,
+        restock: 0xa855f7
+    };
 
-        // Discord Notification
-        if (state.discordWebhook && state.discordWebhook.trim().startsWith('http')) {
-            console.log(`🤖 [Lazada Bot] Sending Discord notification...`);
-            const payload = JSON.stringify({ content: `🔔 **Lazada Bot Alert**\n${message}` });
-            if (typeof GM_xmlhttpRequest === 'function') {
-                try {
-                    GM_xmlhttpRequest({
-                        method: 'POST',
-                        url: state.discordWebhook.trim(),
-                        headers: { "Content-Type": "application/json" },
-                        data: payload
-                    });
-                } catch(e){}
-            } else {
-                fetch(state.discordWebhook.trim(), {
+    function escapeHtml(str) {
+        return String(str == null ? '' : str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+    }
+
+    // Telegram uses HTML (parse_mode=HTML) but Discord uses Markdown - convert tags.
+    function htmlToDiscordMarkdown(html) {
+        return String(html)
+            .replace(/<\/?b>/gi, '**')
+            .replace(/<\/?i>/gi, '*')
+            .replace(/<br\s*\/?>/gi, '\n')
+            .replace(/<[^>]+>/g, '')
+            .replace(/&lt;/g, '<')
+            .replace(/&gt;/g, '>')
+            .replace(/&amp;/g, '&');
+    }
+
+    function sendDiscordNotification(message, type) {
+        const webhook = (state.discordWebhook || '').trim();
+        if (!webhook.startsWith('http')) return;
+
+        let description = htmlToDiscordMarkdown(message);
+        if (description.length > 4000) description = description.slice(0, 3997) + '...';
+        const payload = JSON.stringify({
+            embeds: [{
+                title: '🔔 Lazada Bot Alert',
+                description: description,
+                color: NOTIFY_COLORS[type] || NOTIFY_COLORS.info,
+                timestamp: new Date().toISOString()
+            }]
+        });
+
+        console.log(`🤖 [Lazada Bot] Sending Discord notification (${type})...`);
+        const onDone = (status, body) => {
+            if (status >= 200 && status < 300) console.log('🤖 [Lazada Bot] Discord notification sent. HTTP', status);
+            else console.error('🤖 [Lazada Bot] Discord notification FAILED. HTTP', status, body);
+        };
+
+        if (typeof GM_xmlhttpRequest === 'function') {
+            try {
+                GM_xmlhttpRequest({
                     method: 'POST',
+                    url: webhook,
                     headers: { 'Content-Type': 'application/json' },
-                    body: payload
-                }).catch(()=>{});
+                    data: payload,
+                    onload: (res) => onDone(res.status, res.responseText),
+                    onerror: (err) => console.error('🤖 [Lazada Bot] Discord GM_xmlhttpRequest error:', err)
+                });
+                return;
+            } catch (e) {
+                console.warn('🤖 [Lazada Bot] GM_xmlhttpRequest threw, falling back to fetch:', e);
             }
         }
+        fetch(webhook, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: payload
+        }).then(r => onDone(r.status, '')).catch(e => console.error('🤖 [Lazada Bot] Discord fetch error:', e));
+    }
+
+    function sendTelegramNotification(message, type = 'info') {
+        playAlertSound();
+
+        // Discord Notification (Markdown embed)
+        sendDiscordNotification(message, type);
 
         const token = (state.tgBotToken && state.tgBotToken.trim()) ? state.tgBotToken.trim() : defaultConfig.tgBotToken;
         const chatId = (state.tgChatId && state.tgChatId.trim()) ? state.tgChatId.trim() : defaultConfig.tgChatId;
@@ -586,6 +743,92 @@
                 img.src = url;
                 console.log('🤖 [Lazada Bot] Telegram Image Beacon dispatched.');
             });
+    }
+
+    // --- Product info & timing diagnostics ---
+    function getProductInfo() {
+        let title = '';
+        try {
+            const md = getModuleData();
+            const f = md && md.data && md.data.root && md.data.root.fields;
+            title = (f && f.product && f.product.title) || '';
+        } catch (e) {}
+        if (!title) title = document.querySelector('.pdp-mod-product-badge-title, .product-title, h1')?.textContent?.trim() || '';
+        if (!title) title = (document.title || '').replace(/\s*\|\s*Lazada.*$/i, '').trim() || 'Lazada Product';
+        const price = document.querySelector('.pdp-price_type_normal, .product-price')?.textContent?.trim() || '';
+        return { title, price };
+    }
+
+    function markTiming(key) {
+        if (!state.timing) state.timing = {};
+        state.timing[key] = Date.now();
+        setConfig(state);
+    }
+
+    // Human-readable elapsed times since restock detection - tells us whether the bot was slow
+    function timingSummary() {
+        const t = state.timing || {};
+        if (!t.detectedAt) return '';
+        const labels = [
+            ['buyNowAt', 'Buy Now clicked'],
+            ['checkoutAt', 'Checkout loaded'],
+            ['placeOrderAt', 'Place Order clicked'],
+            ['confirmAt', 'Confirm clicked'],
+            ['errorAt', 'Checkout error']
+        ];
+        const lines = labels
+            .filter(([k]) => t[k])
+            .map(([k, label]) => `• ${label}: +${((t[k] - t.detectedAt) / 1000).toFixed(2)}s`);
+        return lines.length ? `\n⏱ <b>Timing (since restock detected):</b>\n${lines.join('\n')}` : '';
+    }
+
+    const RESTOCK_ALERT_COOLDOWN_MS = 120000; // don't spam the same item's restock alert
+
+    function announceRestock(source, variant, others) {
+        const ids = getProductIds();
+        const baseKey = (ids && ids.itemId) ? String(ids.itemId) : window.location.pathname;
+        const key = variant ? `${baseKey}:${variant.skuId}` : baseKey;
+        const now = Date.now();
+        const last = state.lastRestock;
+        state.currentVariant = variant ? String(variant.name).slice(0, 60) : '';
+
+        if (last && last.key === key && now - last.at < RESTOCK_ALERT_COOLDOWN_MS) {
+            // Same restock already announced - just make sure timing has a start point
+            if (!state.timing || !state.timing.detectedAt) {
+                state.timing = { detectedAt: now };
+            }
+            setConfig(state);
+            return;
+        }
+
+        state.lastRestock = { key, at: now };
+        state.timing = { detectedAt: now };
+        state.checkoutRetries = 0;
+        setConfig(state);
+
+        const { title, price } = getProductInfo();
+        sendTelegramNotification(
+            `📦 <b>RESTOCK DETECTED!</b>\n\n` +
+            `🏷 <b>Product:</b> ${escapeHtml(title)}\n` +
+            (variant ? `🎯 <b>Variant:</b> ${escapeHtml(variant.name)}${variant.stock !== undefined ? ` (stock ${variant.stock})` : ''}\n` : '') +
+            (others && others.length ? `➕ <b>Also in stock:</b> ${escapeHtml(others.map(o => o.name).join(', '))}\n` : '') +
+            (price ? `💰 <b>Price:</b> ${escapeHtml(price)}\n` : '') +
+            `🔍 <b>Source:</b> ${escapeHtml(source || 'unknown')}\n` +
+            `⏰ <b>Time:</b> ${new Date().toLocaleString()}\n` +
+            `🔗 ${escapeHtml(window.location.origin + window.location.pathname)}\n` +
+            `<i>Bot is attempting to buy now...</i>`,
+            'restock'
+        );
+    }
+
+    function variantLine() {
+        return state.currentVariant ? `🎯 <b>Variant:</b> ${escapeHtml(state.currentVariant)}\n` : '';
+    }
+
+    // Called right before navigating from product page to checkout
+    function beforeCheckoutNav() {
+        state.returnUrl = window.location.origin + window.location.pathname; // no query string - keeps cookie small
+        markTiming('buyNowAt');
     }
 
     // SPA URL Change Observer & Interceptor
@@ -639,6 +882,8 @@
     let baxiaSolveMode = false;       // true while we're in captcha-solve mode
 
     function handleBaxiaPunishDetected(iframeEl) {
+        // Allow the checkout flow to restart after the captcha is solved
+        checkoutFlowActive = false;
         // Pause timers but don't disable the bot - we'll resume after solve
         if (reloadTimer) { clearInterval(reloadTimer); reloadTimer = null; }
         if (mtopPollTimer) { clearInterval(mtopPollTimer); mtopPollTimer = null; }
@@ -659,9 +904,10 @@
         sendTelegramNotification(
             `⚠️ <b>Baxia Captcha Triggered</b>\n\n` +
             `🔍 <b>Type:</b> ${isRecaptcha ? 'reCAPTCHA' : 'Baxia Punish'}\n` +
-            `🔗 <b>Page:</b> ${window.location.href}\n` +
+            `🔗 <b>Page:</b> ${escapeHtml(window.location.href)}\n` +
             `⏰ <b>Time:</b> ${new Date().toLocaleString()}\n` +
-            `<i>Attempting auto-click... Bot will resume if solved.</i>`
+            `<i>Attempting auto-click... Bot will resume if solved.</i>`,
+            'warn'
         );
 
         // Try auto-clicking the reCAPTCHA checkbox
@@ -719,8 +965,9 @@
             sendTelegramNotification(
                 `🚨 <b>Auto-solve FAILED</b>\n` +
                 `Please solve the Lazada CAPTCHA manually.\n` +
-                `🔗 ${window.location.href}\n` +
-                `<i>Bot will auto-resume once CAPTCHA is solved.</i>`
+                `🔗 ${escapeHtml(window.location.href)}\n` +
+                `<i>Bot will auto-resume once CAPTCHA is solved.</i>`,
+                'error'
             );
         }
     }
@@ -798,6 +1045,13 @@
 
         let checkCount = 0;
         baxiaAutoSolveTimer = setInterval(() => {
+            if (!state.enabled) {
+                // User stopped the bot while waiting
+                clearInterval(baxiaAutoSolveTimer);
+                baxiaAutoSolveTimer = null;
+                baxiaSolveMode = false;
+                return;
+            }
             checkCount++;
             const stillThere = checkBaxiaPunish();
 
@@ -812,7 +1066,8 @@
                 sendTelegramNotification(
                     `✅ <b>CAPTCHA Solved!</b>\n` +
                     `Bot is resuming automatically.\n` +
-                    `🔗 ${window.location.href}`
+                    `🔗 ${escapeHtml(window.location.href)}`,
+                    'success'
                 );
 
                 // Short delay to let the page settle, then resume
@@ -822,28 +1077,17 @@
                     }
                 }, 2000);
 
-            } else if (checkCount > 180) {
-                // Timed out after ~3 minutes - stop the bot
-                clearInterval(baxiaAutoSolveTimer);
-                baxiaAutoSolveTimer = null;
-                baxiaSolveMode = false;
-
-                state.enabled = false;
-                setConfig(state);
-                updateStatus('🚨 CAPTCHA timeout (3min). Bot stopped. Solve manually.', 'error');
+            } else if (checkCount >= 180) {
+                // ~3 minutes without a solve: keep the bot ALIVE, remind the user and keep waiting
+                checkCount = 0;
+                updateStatus('⌛ CAPTCHA still unsolved. Bot is still waiting - please solve it manually.', 'error');
                 sendTelegramNotification(
-                    `🚨 <b>CAPTCHA Timeout!</b>\n` +
-                    `Could not solve CAPTCHA within 3 minutes.\nBot has been stopped.\n` +
-                    `🔗 ${window.location.href}`
+                    `⏰ <b>CAPTCHA still unsolved (3 min)</b>\n` +
+                    `Bot is still running and will resume automatically once solved.\n` +
+                    `Please solve the CAPTCHA manually.\n` +
+                    `🔗 ${escapeHtml(window.location.href)}`,
+                    'warn'
                 );
-
-                // Update UI buttons to reflect stopped state
-                const startBtn = document.getElementById('bot-start-btn');
-                const stopBtn  = document.getElementById('bot-stop-btn');
-                const statusDot = document.querySelector('.bot-status-dot');
-                if (startBtn) startBtn.classList.remove('hidden');
-                if (stopBtn)  stopBtn.classList.add('hidden');
-                if (statusDot) statusDot.classList.remove('active');
             } else {
                 // Still waiting - update status every 10s
                 if (checkCount % 10 === 0) {
@@ -889,7 +1133,7 @@
             if (window.location.href.includes('/order/success') || window.location.href.includes('order-success')) {
                 if (checkLoopTimer) { clearInterval(checkLoopTimer); checkLoopTimer = null; }
                 updateStatus('🎉 ORDER SUCCESS CONFIRMED ON LAZADA!', 'success');
-                sendTelegramNotification(`🎉 <b>Lazada Order Success Confirmed!</b>\n\nRedirected to order success page:\n${window.location.href}`);
+                sendTelegramNotification(`🎉 <b>Lazada Order Success Confirmed!</b>\n` + variantLine() + `\nRedirected to order success page:\n${escapeHtml(window.location.href)}${timingSummary()}`, 'success');
                 state.enabled = false;
                 setConfig(state);
                 return;
@@ -898,7 +1142,7 @@
             // Always re-evaluate URL dynamically on every tick
             if (window.location.href.includes('/checkout') || window.location.href.includes('checkout.')) {
                 if (checkLoopTimer) { clearInterval(checkLoopTimer); checkLoopTimer = null; }
-                handleCheckoutPage();
+                startCheckoutFlow();
                 return;
             }
 
@@ -988,14 +1232,139 @@
     }
 
     // --- Checkout Automation ---
+    const CHECKOUT_MAX_RETRIES = 5;
+    // Lazada error screens shown when the order can't be built (high traffic / stock gone / risk control)
+    const CHECKOUT_ERROR_PATTERNS = [
+        'unable to process your order',
+        'system is busy',
+        'system busy',
+        'something went wrong',
+        'too many people',
+        'please try again later'
+    ];
+    let checkoutFlowActive = false; // single-flight guard so only one checkout loop runs
+
+    function startCheckoutFlow() {
+        if (checkoutFlowActive) return;
+        checkoutFlowActive = true;
+        handleCheckoutPage(0);
+    }
+
+    function getPageTextExcludingBot() {
+        if (!document.body) return '';
+        let text = document.body.innerText || '';
+        const root = document.getElementById('lazada-bot-root');
+        if (root && root.innerText) text = text.replace(root.innerText, '');
+        return text;
+    }
+
+    // Returns the matching error line from the page, or null
+    function detectCheckoutError() {
+        const text = getPageTextExcludingBot();
+        const lower = text.toLowerCase();
+        for (const p of CHECKOUT_ERROR_PATTERNS) {
+            if (lower.includes(p)) {
+                const line = text.split('\n').find(l => l.toLowerCase().includes(p)) || p;
+                return line.trim().slice(0, 200);
+            }
+        }
+        return null;
+    }
+
+    function findTryAgainButton() {
+        const root = document.getElementById('lazada-bot-root');
+        const candidates = Array.from(document.querySelectorAll('button, a, div, span')).reverse();
+        for (const el of candidates) {
+            if (root && root.contains(el)) continue;
+            const text = (el.innerText || el.textContent || '').trim().toUpperCase();
+            if ((text === 'TRY AGAIN' || text === 'RETRY') && el.offsetWidth > 0 && el.offsetHeight > 0) {
+                return el;
+            }
+        }
+        return null;
+    }
+
+    function handleCheckoutError(errorText) {
+        state.checkoutRetries = (state.checkoutRetries || 0) + 1;
+        if (!state.timing) state.timing = {};
+        if (!state.timing.errorAt) state.timing.errorAt = Date.now();
+        setConfig(state);
+        const n = state.checkoutRetries;
+
+        if (n > CHECKOUT_MAX_RETRIES) {
+            // Give up on this checkout attempt: go back to the product page and resume monitoring
+            const backUrl = state.returnUrl;
+            sendTelegramNotification(
+                `❌ <b>Checkout FAILED after ${CHECKOUT_MAX_RETRIES} retries</b>\n` + variantLine() +
+                `💬 <b>Lazada said:</b> ${escapeHtml(errorText)}\n` +
+                `↩️ Returning to product page and resuming stock monitoring.` +
+                `${timingSummary()}\n` +
+                `🔗 ${escapeHtml(window.location.href)}`,
+                'error'
+            );
+            state.checkoutRetries = 0;
+            state.timing = {};
+            setConfig(state);
+            updateStatus('❌ Checkout kept failing. Returning to product page...', 'error');
+            checkoutFlowActive = false;
+            setTimeout(() => {
+                if (backUrl) window.location.href = backUrl;
+                else history.back();
+            }, 1500);
+            return;
+        }
+
+        if (n === 1) {
+            sendTelegramNotification(
+                `❌ <b>Checkout Error</b>\n` + variantLine() +
+                `💬 <b>Lazada said:</b> ${escapeHtml(errorText)}\n` +
+                `🔁 Auto-retrying (TRY AGAIN) up to ${CHECKOUT_MAX_RETRIES} times...` +
+                `${timingSummary()}\n` +
+                `🔗 ${escapeHtml(window.location.href)}`,
+                'error'
+            );
+        }
+
+        const backoff = Math.min(500 * Math.pow(2, n - 1), 4000); // 0.5s, 1s, 2s, 4s, 4s
+        updateStatus(`❌ Checkout error (retry ${n}/${CHECKOUT_MAX_RETRIES}). Clicking TRY AGAIN in ${(backoff / 1000).toFixed(1)}s...`, 'error');
+
+        setTimeout(() => {
+            if (!state.enabled) { checkoutFlowActive = false; return; }
+            const btn = findTryAgainButton();
+            if (btn) triggerClick(btn);
+            else window.location.reload();
+            // If the page re-renders in place (no reload), continue the flow
+            setTimeout(() => handleCheckoutPage(0), 2000);
+        }, backoff);
+    }
+
     function handleCheckoutPage(attempts = 0) {
-        if (!state.enabled) return;
+        if (!state.enabled) { checkoutFlowActive = false; return; }
 
         // Step 0: Check Baxia Security Dialog
         const baxia = checkBaxiaPunish();
         if (baxia) {
             handleBaxiaPunishDetected(baxia);
             return;
+        }
+
+        // Step 0.5: Lazada "unable to process your order" style error screen
+        const checkoutError = detectCheckoutError();
+        if (checkoutError) {
+            handleCheckoutError(checkoutError);
+            return;
+        }
+
+        // First time on checkout for this restock: notify with timing
+        if (!state.timing || !state.timing.checkoutAt) {
+            markTiming('checkoutAt');
+            sendTelegramNotification(
+                `🛒 <b>Reached Checkout Page!</b>\n` + variantLine() +
+                `⏰ <b>Time:</b> ${new Date().toLocaleString()}` +
+                `${timingSummary()}\n` +
+                `🔗 ${escapeHtml(window.location.href)}`,
+                'info'
+            );
         }
 
         updateStatus('💳 On Checkout page! Checking components...', 'info');
@@ -1031,6 +1400,14 @@
         if (placeOrderBtn) {
             updateStatus('🚀 Found PLACE ORDER NOW button! Clicking...', 'info');
             triggerClick(placeOrderBtn);
+
+            if (!state.timing || !state.timing.placeOrderAt) {
+                markTiming('placeOrderAt');
+                sendTelegramNotification(
+                    `🚀 <b>PLACE ORDER clicked!</b>\nWaiting for payment step...${timingSummary()}`,
+                    'info'
+                );
+            }
 
             // Wait for credit card floating panel or delivery slot grid to open
             updateStatus('⏳ Waiting for Credit Card panel to appear...', 'info');
@@ -1233,6 +1610,13 @@
             return;
         }
 
+        // Lazada can reject the order right after Place Order is clicked
+        const checkoutError = detectCheckoutError();
+        if (checkoutError) {
+            handleCheckoutError(checkoutError);
+            return;
+        }
+
         const creditCardInput = document.querySelector('#creditCard, .automation-input-new-card-number input, .add-card-outer-wrapper');
         
         if (creditCardInput) {
@@ -1313,7 +1697,7 @@
                             `💳 <b>Status:</b> Payment panel container missing. Please click Confirm manually.\n` +
                             `⏰ <b>Time:</b> ${new Date().toLocaleString()}\n` +
                             `🔗 <b>URL:</b> ${window.location.href}`;
-                sendTelegramNotification(msg);
+                sendTelegramNotification(msg + timingSummary(), 'warn');
 
                 state.enabled = false;
                 setConfig(state);
@@ -1371,7 +1755,19 @@
                 if (!state.enabled) return;
                 
                 triggerClick(confirmBtn);
+                markTiming('confirmAt');
                 updateStatus('🚀 CLICKED CONFIRM! Processing...', 'success');
+                sendTelegramNotification(
+                    `💳 <b>CONFIRM clicked!</b>\n` + variantLine() + `Payment is processing - check Lazada / your bank app.` +
+                    `${timingSummary()}\n` +
+                    `🔗 ${escapeHtml(window.location.href)}`,
+                    'success'
+                );
+
+                // Watchdog: if Lazada shows an error screen after Confirm, recover via TRY AGAIN flow
+                setTimeout(() => {
+                    if (state.enabled && detectCheckoutError()) handleCheckoutPage(0);
+                }, 4000);
             }, 150);
         } else if (attempts < 15) {
             updateStatus('Confirm button inside payment panel not clickable yet, retrying...', 'warn');
@@ -1387,7 +1783,7 @@
                         `💳 <b>Status:</b> Card info filled! Please click Confirm manually.\n` +
                         `⏰ <b>Time:</b> ${new Date().toLocaleString()}\n` +
                         `🔗 <b>URL:</b> ${window.location.href}`;
-            sendTelegramNotification(msg);
+            sendTelegramNotification(msg + timingSummary(), 'warn');
 
             state.enabled = false;
             setConfig(state);
@@ -1399,7 +1795,7 @@
     // Extract item/sku/seller IDs from __moduleData__ or URL
     function getProductIds() {
         try {
-            const md = window.__moduleData__;
+            const md = getModuleData();
             if (md && md.data && md.data.root && md.data.root.fields) {
                 const fields = md.data.root.fields;
                 if (fields.productOption && fields.productOption.skuBase && fields.productOption.skuBase.skus) {
@@ -1431,7 +1827,7 @@
     // without any HTTP request. This is the fastest and most bot-safe method.
     function checkStockViaModuleData() {
         try {
-            const md = window.__moduleData__;
+            const md = getModuleData();
             if (!md || !md.data || !md.data.root || !md.data.root.fields) return null;
             const fields = md.data.root.fields;
 
@@ -1508,8 +1904,8 @@
     function getMtopAppKey() {
         // Lazada SG desktop app key — extract from __globalConfig__ or use the known value
         try {
-            if (window.__globalConfig__ && window.__globalConfig__.mtopAppKey) {
-                return window.__globalConfig__.mtopAppKey;
+            if (PAGE.__globalConfig__ && PAGE.__globalConfig__.mtopAppKey) {
+                return PAGE.__globalConfig__.mtopAppKey;
             }
         } catch(e) {}
         return '12574478'; // Lazada SG web desktop app key
@@ -1671,7 +2067,7 @@
 
     // ── METHOD 3: window.Mtop SDK (existing method, kept as tertiary fallback) ──
     function checkStockViaMtop(onSuccess, onFail) {
-        const Mtop = window.Mtop && window.Mtop.default;
+        const Mtop = PAGE.Mtop && PAGE.Mtop.default;
         if (!Mtop || typeof Mtop.request !== 'function') {
             if (onFail) onFail('MTOP not available');
             return;
@@ -1745,12 +2141,342 @@
         return null;
     }
 
+    // ── MULTI-VARIANT (SKU) SUPPORT ──
+    // Products like "Day: Pikachu ... Night: Zapdos" have many SKUs under one link.
+    // Lazada returns ALL SKUs (names + stock) in __moduleData__ and in the same getDetailInfo
+    // response we already poll, so watching every variant adds NO extra requests and no
+    // extra page interaction - tiles are only clicked when a watched variant is buyable.
+    const VARIANT_PREFS_KEY = 'lazada_bot_variant_prefs';
+    let lastVariantSummary = '';
+    let lastVariantRenderSig = '';
+    let currentVariants = [];
+    let variantModeActive = false;
+    let cachedModuleData = null;
+    let lastVariantLogSig = '';
+
+    // Lazada product data: page global first, then parse the inline <script> that defines it
+    function getModuleData() {
+        try { if (PAGE.__moduleData__) return PAGE.__moduleData__; } catch (e) {}
+        if (cachedModuleData) return cachedModuleData;
+        try {
+            for (const s of document.scripts) {
+                const txt = s.textContent || '';
+                const at = txt.indexOf('__moduleData__');
+                if (at < 0 || (txt.indexOf('skuBase') < 0 && txt.indexOf('skuInfos') < 0)) continue;
+                const start = txt.indexOf('{', at);
+                if (start < 0) continue;
+                let depth = 0, inStr = false, esc = false, end = -1;
+                for (let i = start; i < txt.length; i++) {
+                    const c = txt[i];
+                    if (inStr) {
+                        if (esc) esc = false;
+                        else if (c === '\\') esc = true;
+                        else if (c === '"') inStr = false;
+                        continue;
+                    }
+                    if (c === '"') inStr = true;
+                    else if (c === '{') depth++;
+                    else if (c === '}' && --depth === 0) { end = i; break; }
+                }
+                if (end > start) {
+                    cachedModuleData = JSON.parse(txt.slice(start, end + 1));
+                    console.log('🤖 [Lazada Bot] __moduleData__ parsed from inline <script>.');
+                    return cachedModuleData;
+                }
+            }
+        } catch (e) {
+            console.warn('🤖 [Lazada Bot] Could not parse inline __moduleData__:', e);
+        }
+        return null;
+    }
+
+    // Fallback: variant names from the SKU tiles on the page (stock unknown)
+    function extractVariantsFromDom() {
+        const root = document.getElementById('module_sku-select');
+        if (!root) return [];
+        const seen = new Set();
+        const out = [];
+        // Support both old and v2 revamp classes
+        const nodes = root.querySelectorAll('.sku-variable-img-name, .sku-variable-name, .sku-variable-size, [class*="sku-variable-name"], [class*="sku-variable-img-name"], [class*="sku-variable-size"], .sku-name, .sku-prop-content-v2 span');
+        nodes.forEach(n => {
+            let name = (n.getAttribute('title') || n.textContent || '').trim();
+            // In v2, sometimes the text has "Color: Red" or similar
+            name = name.replace(/^.*?:\\s*/, '');
+            if (!name || seen.has(name.toLowerCase())) return;
+            seen.add(name.toLowerCase());
+            out.push({ skuId: '', itemId: '', parts: [name], name, key: name.toLowerCase(), stock: undefined, fromDom: true });
+        });
+        return out.length >= 2 ? out : [];
+    }
+
+    // Best available variant list: page data (has stock) -> SKU tiles (names only)
+    function getVariants() {
+        let variants = extractVariants(getModuleData());
+        let source = 'page data';
+        if (!variants.length) {
+            variants = extractVariantsFromDom();
+            source = 'SKU tiles (stock via API)';
+        }
+        const sig = source + ':' + variants.map(v => `${v.name}=${v.stock}`).join('|');
+        if (sig !== lastVariantLogSig) {
+            lastVariantLogSig = sig;
+            if (variants.length) {
+                console.log(`🤖 [Lazada Bot] ${variants.length} variants detected via ${source}:`);
+                console.table(variants.map(v => ({ name: v.name, skuId: v.skuId, stock: v.stock })));
+            } else {
+                console.log('🤖 [Lazada Bot] No multi-variant selector found (single-SKU product).');
+            }
+        }
+        return variants;
+    }
+
+    function refreshVariantPanel() {
+        try { renderVariantPanel(getVariants()); } catch (e) { console.warn('🤖 [Lazada Bot] Variant panel error:', e); }
+    }
+
+    function escapeAttr(str) {
+        return escapeHtml(str).replace(/"/g, '&quot;');
+    }
+
+    // Locate the "fields" object in __moduleData__ or an MTOP getDetailInfo module
+    function findRootFields(obj) {
+        if (!obj || typeof obj !== 'object') return null;
+        if (obj.data && obj.data.root && obj.data.root.fields) return obj.data.root.fields;
+        if (obj.root && obj.root.fields) return obj.root.fields;
+        if (obj.fields && (obj.fields.skuInfos || obj.fields.productOption)) return obj.fields;
+        if (obj.skuInfos || obj.productOption) return obj;
+        return null;
+    }
+
+    function pickStockNumber(o) {
+        if (!o || typeof o !== 'object') return undefined;
+        for (const k of ['stock', 'sellableQuantity', 'stockNum', 'quantity']) {
+            const v = o[k];
+            if (typeof v === 'number') return v;
+            if (typeof v === 'string' && v.trim() !== '' && !isNaN(v)) return parseInt(v, 10);
+        }
+        return undefined;
+    }
+
+    // Returns [{ skuId, itemId, parts:["Night: Umbreon"], name, stock }] or [] for single-SKU products
+    function extractVariants(source) {
+        const fields = findRootFields(source);
+        if (!fields) return [];
+        const skuBase = fields.productOption && fields.productOption.skuBase;
+        const skus = (skuBase && Array.isArray(skuBase.skus)) ? skuBase.skus : [];
+        if (skus.length < 2) return [];
+
+        // Map "pid:vid" -> readable value name (e.g. "Night: Umbreon")
+        const valueNames = {};
+        const props = (skuBase && Array.isArray(skuBase.properties)) ? skuBase.properties : [];
+        for (const p of props) {
+            for (const v of (p.values || [])) {
+                valueNames[`${p.pid}:${v.vid}`] = String(v.name || v.value || '').trim();
+            }
+        }
+
+        const skuInfos = fields.skuInfos || {};
+        return skus.map(s => {
+            const skuId = String(s.skuId || s.cartSkuId || '');
+            const parts = String(s.propPath || '').split(';').filter(Boolean)
+                .map(pv => valueNames[pv]).filter(Boolean);
+            let stock = pickStockNumber(skuInfos[skuId]);
+            if (stock === undefined) stock = pickStockNumber(s);
+            return {
+                skuId,
+                itemId: String(s.itemId || s.cartItemId || ''),
+                parts,
+                name: parts.length ? parts.join(' / ') : `SKU ${skuId}`,
+                key: (parts.length ? parts.join(' / ') : `SKU ${skuId}`).toLowerCase(),
+                stock
+            };
+        }).filter(v => v.skuId);
+    }
+
+    // Per-item preferences live in localStorage (NOT the shared cookie, to keep it small)
+    function loadAllVariantPrefs() {
+        try { return JSON.parse(localStorage.getItem(VARIANT_PREFS_KEY) || '{}') || {}; } catch (e) { return {}; }
+    }
+    function getVariantPrefs(itemId) {
+        const p = loadAllVariantPrefs()[itemId] || {};
+        return { order: p.order || [], unwatched: p.unwatched || [] }; // default: watch ALL, page order
+    }
+    function saveVariantPrefs(itemId, prefs) {
+        const all = loadAllVariantPrefs();
+        all[itemId] = prefs;
+        try { localStorage.setItem(VARIANT_PREFS_KEY, JSON.stringify(all)); } catch (e) {}
+    }
+    function sortVariantsByPriority(variants, prefs) {
+        const idx = id => { const i = prefs.order.indexOf(id); return i === -1 ? 1e6 : i; };
+        return variants
+            .map((v, i) => ({ v, i }))
+            .sort((a, b) => (idx(a.v.key) - idx(b.v.key)) || (a.i - b.i))
+            .map(x => x.v);
+    }
+    function variantItemId(variants) {
+        return (variants[0] && variants[0].itemId) || ((getProductIds() || {}).itemId) || window.location.pathname;
+    }
+
+    function renderVariantPanel(variants) {
+        const box = document.getElementById('bot-variants');
+        if (!box) return;
+        if (!variants || variants.length < 2) { box.classList.add('hidden'); return; }
+        currentVariants = variants;
+
+        const itemId = variantItemId(variants);
+        const prefs = getVariantPrefs(itemId);
+        const ordered = sortVariantsByPriority(variants, prefs);
+        const sig = itemId + '|' + ordered.map(v => `${v.key}:${v.stock}:${prefs.unwatched.includes(v.key) ? 0 : 1}`).join(',');
+        if (sig === lastVariantRenderSig && !box.classList.contains('hidden')) return;
+        lastVariantRenderSig = sig;
+        box.classList.remove('hidden');
+
+        const watchedCount = ordered.filter(v => !prefs.unwatched.includes(v.key)).length;
+        box.innerHTML =
+            `<div class="bot-variants-head"><span>Variants (${watchedCount}/${ordered.length} watched)</span><span class="bot-variants-hint">top = highest priority</span></div>` +
+            '<div class="bot-variants-list">' +
+            ordered.map((v, i) => {
+                const badge = v.stock === undefined
+                    ? '<span class="bot-badge bot-badge-unknown">?</span>'
+                    : v.stock > 0
+                        ? `<span class="bot-badge bot-badge-in">${v.stock}</span>`
+                        : '<span class="bot-badge bot-badge-out">0</span>';
+                return `<div class="bot-variant-row" data-key="${escapeAttr(v.key)}">` +
+                    `<input type="checkbox" class="bot-variant-watch" ${prefs.unwatched.includes(v.key) ? '' : 'checked'}>` +
+                    `<span class="bot-variant-name" title="${escapeAttr(v.name)}">${escapeHtml(v.name)}</span>` +
+                    badge +
+                    `<button type="button" class="bot-variant-move" data-dir="-1" ${i === 0 ? 'disabled' : ''}>▲</button>` +
+                    `<button type="button" class="bot-variant-move" data-dir="1" ${i === ordered.length - 1 ? 'disabled' : ''}>▼</button>` +
+                    `</div>`;
+            }).join('') +
+            '</div>';
+    }
+
+    // true  = a watched variant is in stock and the buy flow was started
+    // false = multi-variant product, nothing watched is in stock
+    // null  = not a multi-variant product / per-variant stock unknown (use legacy logic)
+    function evaluateVariants(variants, source) {
+        if (!variants || variants.length < 2) return null;
+        variantModeActive = true;
+        renderVariantPanel(variants);
+        if (!variants.some(v => v.stock !== undefined)) return null;
+
+        const prefs = getVariantPrefs(variantItemId(variants));
+        const watched = sortVariantsByPriority(variants, prefs).filter(v => !prefs.unwatched.includes(v.key));
+        const inStockAll = variants.filter(v => v.stock > 0);
+        const inStockWatched = watched.filter(v => v.stock > 0);
+        lastVariantSummary = ` · ${variants.length} variants, ${inStockAll.length} in stock, ${watched.length} watched`;
+
+        if (inStockWatched.length === 0) return false;
+
+        const target = inStockWatched[0]; // highest priority in-stock variant
+        updateStatus(`📦 VARIANT IN STOCK: ${target.name} (${target.stock})! Taking action...`, 'success');
+        if (mtopPollTimer) { clearInterval(mtopPollTimer); mtopPollTimer = null; }
+        if (reloadTimer) { clearInterval(reloadTimer); reloadTimer = null; }
+        if (checkLoopTimer) { clearInterval(checkLoopTimer); checkLoopTimer = null; }
+        handleInStock(source, target, inStockWatched.slice(1));
+        return true;
+    }
+
+    function getSelectedVariantNames() {
+        const root = document.getElementById('module_sku-select') || document;
+        const names = new Set();
+        root.querySelectorAll('.sku-name, .sku-variable-img-wrap-selected .sku-variable-img-name, .sku-prop-content-v2.active span, [class*="active"] .sku-name, [class*="selected"] .sku-name').forEach(n => {
+            let t = (n.getAttribute('title') || n.textContent || '').trim();
+            t = t.replace(/^.*?:\s*/, '').toLowerCase();
+            if (t) names.add(t);
+        });
+        return names;
+    }
+
+    function isVariantSelected(variant) {
+        if (!variant.parts.length) {
+            return new RegExp(`-s${variant.skuId}(?!\\d)`).test(window.location.pathname);
+        }
+        const sel = getSelectedVariantNames();
+        return variant.parts.every(p => sel.has(p.trim().toLowerCase()));
+    }
+
+    // Click the tile(s) for this variant (one per option group)
+    function clickVariantTiles(variant) {
+        const root = document.getElementById('module_sku-select');
+        if (!root) return false;
+        const sel = getSelectedVariantNames();
+        let clicked = false;
+        for (const part of variant.parts) {
+            const want = part.trim().toLowerCase();
+            if (sel.has(want)) continue;
+            const nodes = root.querySelectorAll('.sku-variable-img-name, .sku-variable-name, .sku-variable-size, [class*="sku-variable-name"], [class*="sku-variable-img-name"], [class*="sku-variable-size"], .sku-name, .sku-prop-content-v2 span, [title]');
+            for (const n of nodes) {
+                let t = (n.getAttribute('title') || n.textContent || '').trim();
+                t = t.replace(/^.*?:\s*/, '').toLowerCase();
+                if (t !== want) continue;
+                const tile = n.closest('.sku-variable-img-wrap, .sku-variable-img-wrap-selected, .sku-prop-content-v2') || n;
+                triggerClick(tile);
+                clicked = true;
+                break;
+            }
+        }
+        return clicked;
+    }
+
+    function variantUrl(variant) {
+        const path = window.location.pathname;
+        if (/-s\d+\.html/.test(path)) {
+            return window.location.origin + path.replace(/-s\d+\.html/, `-s${variant.skuId}.html`);
+        }
+        return `${window.location.origin}/products/pdp-i${variant.itemId}-s${variant.skuId}.html`;
+    }
+
+    function selectVariantAndContinue(variant, source, others, attempts = 0) {
+        if (!state.enabled) return;
+
+        if (isVariantSelected(variant) && checkIsInStock()) {
+            handleInStock(source, variant, others, true);
+            return;
+        }
+
+        if (attempts === 0 || attempts === 6) {
+            updateStatus(`🎯 Selecting variant: ${variant.name}...`, 'info');
+            clickVariantTiles(variant);
+        }
+        if (attempts < 12) { // ~1.8s max
+            setTimeout(() => selectVariantAndContinue(variant, source, others, attempts + 1), 150);
+            return;
+        }
+
+        // Selected but Buy Now not enabled -> let the normal flow refresh / re-evaluate
+        if (isVariantSelected(variant)) {
+            handleInStock(source, variant, others, true);
+            return;
+        }
+
+        // Tile click didn't work: open the variant's own URL (pre-selects that SKU)
+        const last = state.lastVariantNav;
+        if (last && last.skuId === variant.skuId && Date.now() - last.at < 20000) {
+            updateStatus(`⚠️ Could not select ${variant.name}. Refreshing...`, 'warn');
+            setTimeout(() => window.location.reload(), 1000 + Math.random() * 500);
+            return;
+        }
+        state.lastVariantNav = { skuId: variant.skuId, at: Date.now() };
+        setConfig(state);
+        updateStatus(`↪️ Opening variant page: ${variant.name}...`, 'info');
+        window.location.href = variantUrl(variant);
+    }
+
     function runStockCheck() {
         if (!state.enabled) return;
         if (isMtopPolling) return; // Already polling, skip tick
 
+        // ── STEP 0: Multi-variant products - evaluate ALL variants from the page snapshot ──
+        const mdVariantResult = evaluateVariants(getVariants(), 'page snapshot');
+        if (mdVariantResult === true) return;
+        if (mdVariantResult === false) {
+            updateStatus(`Out of Stock (snapshot${lastVariantSummary}). Waiting for API confirmation...`, 'warn');
+        }
+
         // ── STEP 1: Try __moduleData__ snapshot (instant, zero network cost) ──
-        const mdInfo = checkStockViaModuleData();
+        const mdInfo = variantModeActive ? null : checkStockViaModuleData();
         if (mdInfo !== null) {
             const inStock = evaluateStockFromMtop(mdInfo);
             if (inStock === true) {
@@ -1758,7 +2484,7 @@
                 if (mtopPollTimer) { clearInterval(mtopPollTimer); mtopPollTimer = null; }
                 if (reloadTimer) { clearInterval(reloadTimer); reloadTimer = null; }
                 if (checkLoopTimer) { clearInterval(checkLoopTimer); checkLoopTimer = null; }
-                handleInStock();
+                handleInStock(mdInfo.source);
                 return;
             } else if (inStock === false) {
                 const qty = mdInfo.quantity !== undefined ? mdInfo.quantity : 0;
@@ -1777,13 +2503,27 @@
                 isMtopPolling = false;
                 if (!state.enabled) return;
 
+                // Multi-variant: one API response contains every variant's stock
+                const apiVariantResult = evaluateVariants(extractVariants(stockInfo && stockInfo.raw), 'MTOP API (fetch)');
+                if (apiVariantResult === true) return;
+                if (apiVariantResult === false) {
+                    updateStatus(`Out of Stock${lastVariantSummary}. Next check in ${state.minRefresh || 3}s...`, 'warn');
+                    scheduleMtopPoll();
+                    return;
+                }
+                if (variantModeActive) {
+                    // Single-SKU numbers are unreliable for multi-variant items
+                    tryMtopSdkOrDom();
+                    return;
+                }
+
                 const inStock = evaluateStockFromMtop(stockInfo);
 
                 if (inStock === true) {
                     if (mtopPollTimer) { clearInterval(mtopPollTimer); mtopPollTimer = null; }
                     if (reloadTimer) { clearInterval(reloadTimer); reloadTimer = null; }
                     if (checkLoopTimer) { clearInterval(checkLoopTimer); checkLoopTimer = null; }
-                    handleInStock();
+                    handleInStock('MTOP API (fetch)');
                 } else if (inStock === false) {
                     const qty = stockInfo && stockInfo.quantity !== undefined ? stockInfo.quantity : 0;
                     updateStatus(`Out of Stock (API qty:${qty}). Next check in ${state.minRefresh || 3}s...`, 'warn');
@@ -1806,7 +2546,7 @@
     // ── STEP 3: Try window.Mtop SDK, then DOM fallback ──
     function tryMtopSdkOrDom() {
         if (!state.enabled) return;
-        const mtopAvailable = !!(window.Mtop && window.Mtop.default && typeof window.Mtop.default.request === 'function');
+        const mtopAvailable = !!(PAGE.Mtop && PAGE.Mtop.default && typeof PAGE.Mtop.default.request === 'function');
 
         if (mtopAvailable) {
             isMtopPolling = true;
@@ -1815,12 +2555,20 @@
                 function(stockInfo, rawRes) {
                     isMtopPolling = false;
                     if (!state.enabled) return;
+                    const sdkVariantResult = evaluateVariants(extractVariants(stockInfo && stockInfo.raw), 'MTOP SDK');
+                    if (sdkVariantResult === true) return;
+                    if (sdkVariantResult === false) {
+                        updateStatus(`Out of Stock${lastVariantSummary}. Next check in ${state.minRefresh || 3}s...`, 'warn');
+                        scheduleMtopPoll();
+                        return;
+                    }
+                    if (variantModeActive) { runDomStockCheck(); return; }
                     const inStock = evaluateStockFromMtop(stockInfo);
                     if (inStock === true) {
                         if (mtopPollTimer) { clearInterval(mtopPollTimer); mtopPollTimer = null; }
                         if (reloadTimer) { clearInterval(reloadTimer); reloadTimer = null; }
                         if (checkLoopTimer) { clearInterval(checkLoopTimer); checkLoopTimer = null; }
-                        handleInStock();
+                        handleInStock('MTOP SDK');
                     } else if (inStock === false) {
                         const qty = stockInfo && stockInfo.quantity !== undefined ? stockInfo.quantity : 0;
                         updateStatus(`Out of Stock (SDK qty:${qty}). Next check in ${state.minRefresh || 3}s...`, 'warn');
@@ -1861,7 +2609,7 @@
                 return;
             }
             if (countdown > 0) {
-                updateStatus(`Out of Stock. Next API check in ${countdown}s...`, 'warn');
+                updateStatus(`Out of Stock${lastVariantSummary}. Next API check in ${countdown}s...`, 'warn');
             } else {
                 clearInterval(mtopPollTimer);
                 mtopPollTimer = null;
@@ -1887,9 +2635,22 @@
                 startRefreshCountdown();
             }
         } else if (isInStock) {
+            if (variantModeActive && currentVariants.length) {
+                // Only buy the currently selected variant if it's on the watch list
+                const prefs = getVariantPrefs(variantItemId(currentVariants));
+                const selected = currentVariants.find(v => isVariantSelected(v)) || null;
+                if (selected && prefs.unwatched.includes(selected.key)) {
+                    if (!reloadTimer) startRefreshCountdown();
+                    return;
+                }
+                if (reloadTimer) { clearInterval(reloadTimer); reloadTimer = null; }
+                if (checkLoopTimer) { clearInterval(checkLoopTimer); checkLoopTimer = null; }
+                handleInStock('DOM (Buy Now button)', selected, [], true);
+                return;
+            }
             if (reloadTimer) { clearInterval(reloadTimer); reloadTimer = null; }
             if (checkLoopTimer) { clearInterval(checkLoopTimer); checkLoopTimer = null; }
-            handleInStock();
+            handleInStock('DOM (Buy Now button)');
         }
     }
 
@@ -1990,8 +2751,17 @@
         }, 1000);
     }
 
-    function handleInStock() {
-        updateStatus('📦 IN STOCK! Taking action...', 'info');
+    function handleInStock(source, variant = null, otherVariants = [], alreadySelected = false) {
+        updateStatus(variant ? `📦 IN STOCK: ${variant.name}! Taking action...` : '📦 IN STOCK! Taking action...', 'info');
+
+        // Notify Discord/Telegram (de-duplicated per item / variant)
+        announceRestock(source, variant, otherVariants);
+
+        // Multi-variant: make sure the restocked variant is the one selected on the page
+        if (variant && !alreadySelected && !isVariantSelected(variant)) {
+            selectVariantAndContinue(variant, source, otherVariants, 0);
+            return;
+        }
 
         // Check if front-end actually shows it
         if (!checkIsInStock()) {
@@ -2006,7 +2776,12 @@
 
         // Locate input field
         const qtyInput = document.querySelector('.next-number-picker-input input');
-        const targetQty = state.quantity || 1;
+        let targetQty = state.quantity || 1;
+        // Respect Lazada's per-person / stock limit if the input exposes one
+        if (qtyInput) {
+            const maxAttr = parseInt(qtyInput.getAttribute('max') || '', 10);
+            if (maxAttr > 0 && targetQty > maxAttr) targetQty = maxAttr;
+        }
 
         if (qtyInput) {
             setInputValue(qtyInput, targetQty);
@@ -2101,6 +2876,7 @@
                 }
 
                 updateStatus('🚀 Clicking Check Out...', 'success');
+                beforeCheckoutNav();
                 checkoutBtn.click();
                 monitorCheckoutNavigation();
             } else {
@@ -2133,7 +2909,7 @@
             if (window.location.href.includes('/checkout') || window.location.href.includes('checkout.')) {
                 clearInterval(checkNav);
                 updateStatus('🎉 CLICK SUCCESS! Navigated to Checkout!', 'success');
-                handleCheckoutPage();
+                startCheckoutFlow();
             } else if (attempts > 20) {
                 clearInterval(checkNav);
                 updateStatus('Action clicked. Complete checkout manually if no popup.', 'info');
@@ -2147,17 +2923,19 @@
 
         if (buyNowBtn && !buyNowBtn.disabled) {
             updateStatus('🚀 Clicking BUY NOW...', 'success');
+            beforeCheckoutNav();
             buyNowBtn.click();
             setTimeout(() => {
                 monitorCheckoutNavigation();
-            }, 800); // Wait a little delay after add to cart
+            }, 300); // monitor polls itself, no need for a long delay
         } else if (orderTotalBtn && !orderTotalBtn.disabled) {
             // Fallback for RedMart Check Out button
             updateStatus('🚀 Clicking Check Out...', 'success');
+            beforeCheckoutNav();
             orderTotalBtn.click();
             setTimeout(() => {
                 monitorCheckoutNavigation();
-            }, 800); // Wait a little delay after add to cart
+            }, 300);
         } else {
             updateStatus('Buy Now button not clickable yet. Retrying...', 'warn');
             setTimeout(clickBuyNow, 500);
