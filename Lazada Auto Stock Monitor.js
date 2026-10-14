@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Lazada Auto Stock Monitor & Quick Buy Bot
 // @namespace    http://tampermonkey.net/
-// @version      1.5.1
-// @description  Automated stock checker using Lazada's internal MTOP API (no page refresh = anti-bot safe), with DOM fallback. Includes quantity selector and Buy Now trigger with modern GUI.
+// @version      1.6.0
+// @description  Automated stock checker using Lazada's internal MTOP API (no page refresh = anti-bot safe), with DOM fallback. Includes quantity selector, multi-item watchlist, and fast checkout.
 // @author       Pythonic Shariful
 // @match        https://*.lazada.sg/*
 // @match        https://s.lazada.sg/*
@@ -12,6 +12,7 @@
 // @match        http://s.lazada.sg/*
 // @match        http://*.lazada.com/*
 // @match        http://lazada.sg/*
+// @noframes
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
 // @connect      discord.com
@@ -23,11 +24,16 @@
 (function () {
     'use strict';
 
+    // Strict guard against running inside iframes (e.g. Baxia captcha / reCAPTCHA iframes)
+    if (window.top !== window.self) {
+        return;
+    }
+
     // With @grant enabled, Tampermonkey runs us in a sandbox where page globals
     // (__moduleData__, Mtop, __globalConfig__) are NOT visible on `window`. Read them from the real page window.
     const PAGE = (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window;
 
-    console.log('🤖 [Lazada Bot] Script loaded and running! v1.5.1 (multi-variant)');
+    console.log('🤖 [Lazada Bot] Script loaded and running! v1.6.0 (anti-captcha & multi-item)');
 
     // Default configuration & State Keys
     const STORAGE_KEY = 'lazada_bot_config';
@@ -44,7 +50,8 @@
         tgBotToken: '8156587833:AAEwTAIdqcTkT6U8fSj4uD49AdKklG2nfdc',
         tgChatId: '7809021498',
         discordWebhook: '',
-        lastStatus: 'Idle'
+        lastStatus: 'Idle',
+        watchlist: [] // Multi-product URL watchlist for background cycling
     };
 
     function setConfig(newConfig) {
@@ -137,6 +144,9 @@
 
     // --- UI Creation ---
     function injectUI() {
+        if (window.top !== window.self) return;
+        const currentHref = window.location.href;
+        if (currentHref.includes('_____tmd_____') || currentHref.includes('punish') || currentHref.includes('bixi.alicdn')) return;
         if (document.getElementById('lazada-bot-root')) return;
 
         console.log('🤖 [Lazada Bot] Injecting UI...');
@@ -198,6 +208,20 @@
                         <div class="bot-field-group flex-1">
                             <label for="bot-discord">Discord Webhook</label>
                             <input type="text" id="bot-discord" placeholder="https://discord.com/api/webhooks/..." value="${state.discordWebhook || ''}">
+                        </div>
+                    </div>
+                    <div id="bot-watchlist-section" class="bot-watchlist-section">
+                        <div class="bot-watchlist-head">
+                            <span class="bot-watchlist-title">📋 Watchlist (<span id="bot-watchlist-count">${(state.watchlist || []).length}</span>)</span>
+                            <button type="button" id="bot-watchlist-toggle" class="bot-icon-btn" style="font-size:11px;padding:1px 5px;">Toggle</button>
+                        </div>
+                        <div id="bot-watchlist-body" class="bot-watchlist-body hidden">
+                            <div class="bot-field-row" style="margin-bottom:6px;">
+                                <input type="text" id="bot-watchlist-input" placeholder="Paste product URL..." class="flex-1" style="font-size:11px;">
+                                <button type="button" id="bot-watchlist-add-btn" class="bot-mini-btn" style="background:#0284c7;color:#fff;">+ Add</button>
+                            </div>
+                            <button type="button" id="bot-watchlist-add-current" class="bot-mini-btn" style="width:100%;margin-bottom:6px;background:rgba(255,255,255,0.06);color:#94a3b8;">+ Add Current Product</button>
+                            <div id="bot-watchlist-list" class="bot-watchlist-list"></div>
                         </div>
                     </div>
                     <div id="bot-variants" class="bot-variants hidden"></div>
@@ -426,6 +450,68 @@
                 padding: 0 2px;
             }
             .bot-variant-move:disabled { opacity: 0.25; cursor: default; }
+            .bot-watchlist-section {
+                background: rgba(30, 41, 59, 0.45);
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                border-radius: 8px;
+                padding: 8px 10px;
+            }
+            .bot-watchlist-head {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                font-size: 11px;
+                font-weight: 700;
+                color: #94a3b8;
+                text-transform: uppercase;
+                letter-spacing: 0.5px;
+            }
+            .bot-watchlist-body {
+                margin-top: 8px;
+            }
+            .bot-mini-btn {
+                background: rgba(255, 255, 255, 0.1);
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: 6px;
+                padding: 4px 8px;
+                font-size: 11px;
+                font-weight: 600;
+                cursor: pointer;
+                transition: all 0.2s;
+            }
+            .bot-mini-btn:hover {
+                filter: brightness(1.2);
+            }
+            .bot-watchlist-list {
+                max-height: 120px;
+                overflow-y: auto;
+                display: flex;
+                flex-direction: column;
+                gap: 4px;
+            }
+            .bot-watchlist-row {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                background: rgba(15, 23, 42, 0.5);
+                padding: 4px 8px;
+                border-radius: 6px;
+                font-size: 11px;
+            }
+            .bot-watchlist-row span {
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+                max-width: 220px;
+            }
+            .bot-watchlist-del {
+                color: #ef4444;
+                cursor: pointer;
+                border: none;
+                background: none;
+                font-size: 12px;
+                padding: 0 4px;
+            }
             .hidden { display: none !important; }
             .bot-status-box {
                 background: rgba(15, 23, 42, 0.7);
@@ -582,6 +668,84 @@
             state.discordWebhook = discordInput.value.trim();
             setConfig(state);
         });
+
+        // --- Multi-Item Watchlist UI Handlers ---
+        const wlToggle = document.getElementById('bot-watchlist-toggle');
+        const wlBody = document.getElementById('bot-watchlist-body');
+        const wlInput = document.getElementById('bot-watchlist-input');
+        const wlAddBtn = document.getElementById('bot-watchlist-add-btn');
+        const wlAddCurBtn = document.getElementById('bot-watchlist-add-current');
+        const wlList = document.getElementById('bot-watchlist-list');
+        const wlCount = document.getElementById('bot-watchlist-count');
+
+        const renderWatchlist = () => {
+            if (!state.watchlist) state.watchlist = [];
+            if (wlCount) wlCount.textContent = state.watchlist.length;
+            if (!wlList) return;
+            if (state.watchlist.length === 0) {
+                wlList.innerHTML = '<div style="color:#64748b;font-size:11px;text-align:center;padding:6px 0;">No items in watchlist (monitoring current tab)</div>';
+                return;
+            }
+            wlList.innerHTML = state.watchlist.map((url, idx) => {
+                let display = url.replace(/^https?:\/\/[^/]+/, '');
+                if (display.length > 30) display = display.slice(0, 28) + '...';
+                return `
+                    <div class="bot-watchlist-row">
+                        <span title="${escapeHtml(url)}">${idx + 1}. ${escapeHtml(display)}</span>
+                        <button type="button" class="bot-watchlist-del" data-index="${idx}" title="Remove item">✕</button>
+                    </div>
+                `;
+            }).join('');
+        };
+
+        wlToggle?.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            wlBody?.classList.toggle('hidden');
+        });
+
+        wlAddBtn?.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const val = (wlInput?.value || '').trim();
+            if (!val || !val.startsWith('http')) return;
+            if (!state.watchlist) state.watchlist = [];
+            if (!state.watchlist.includes(val)) {
+                state.watchlist.push(val);
+                setConfig(state);
+                renderWatchlist();
+            }
+            if (wlInput) wlInput.value = '';
+        });
+
+        wlAddCurBtn?.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const curUrl = window.location.href;
+            if (!curUrl.includes('/products/') && !curUrl.match(/i\d+/)) {
+                alert('Current page does not appear to be a Lazada product page.');
+                return;
+            }
+            if (!state.watchlist) state.watchlist = [];
+            if (!state.watchlist.includes(curUrl)) {
+                state.watchlist.push(curUrl);
+                setConfig(state);
+                renderWatchlist();
+            }
+        });
+
+        wlList?.addEventListener('click', (e) => {
+            const delBtn = e.target.closest('.bot-watchlist-del');
+            if (!delBtn) return;
+            const idx = parseInt(delBtn.dataset.index, 10);
+            if (!isNaN(idx) && state.watchlist) {
+                state.watchlist.splice(idx, 1);
+                setConfig(state);
+                renderWatchlist();
+            }
+        });
+
+        renderWatchlist();
 
         // Variant watch list / priority (event delegation - panel content is re-rendered)
         const variantsBox = document.getElementById('bot-variants');
@@ -866,15 +1030,49 @@
     }
 
     // --- Anti-Bot / Baxia Security Check Detection ---
+    function isElementVisible(el) {
+        if (!el || !el.isConnected) return false;
+        try {
+            const rect = el.getBoundingClientRect();
+            if (rect.width <= 25 || rect.height <= 25) return false;
+            const style = window.getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
     function checkBaxiaPunish() {
-        return document.querySelector(
+        if (window.location.href.includes('_____tmd_____/punish') || window.location.href.includes('punish?')) {
+            return document.body || document.documentElement;
+        }
+
+        const candidates = document.querySelectorAll(
             '#baxia-dialog-content, ' +
             'iframe[src*="bixi.alicdn.com/punish"], ' +
             'iframe[src*="action=deny"], ' +
             'iframe[src*="punish:resource"], ' +
             'iframe[src*="_____tmd_____/punish"], ' +
-            'iframe[src*="action=captcha"]'
+            'iframe[src*="action=captcha"], ' +
+            'iframe[src*="recaptcha/api2/anchor"], ' +
+            'iframe[src*="recaptcha/enterprise/anchor"], ' +
+            '.baxia-dialog, ' +
+            '#nc_1_wrapper'
         );
+
+        for (const el of candidates) {
+            if (isElementVisible(el)) {
+                if (el.id === 'baxia-dialog-content' || el.classList.contains('baxia-dialog')) {
+                    const subIframe = el.querySelector('iframe');
+                    if (subIframe && isElementVisible(subIframe)) return subIframe;
+                    if (el.innerText.trim().length > 0) return el;
+                } else {
+                    return el;
+                }
+            }
+        }
+        return null;
     }
 
     let baxiaAutoSolveTimer = null;   // monitors captcha disappearance
@@ -888,8 +1086,14 @@
         if (reloadTimer) { clearInterval(reloadTimer); reloadTimer = null; }
         if (mtopPollTimer) { clearInterval(mtopPollTimer); mtopPollTimer = null; }
         isMtopPolling = false;
-        // NOTE: we intentionally keep checkLoopTimer running but at reduced rate
-        //       so botTick keeps monitoring until the captcha is gone.
+
+        // Auto-collapse panel so it never blocks the user from seeing or clicking the CAPTCHA
+        const botBody = document.getElementById('bot-body');
+        const toggleBtn = document.getElementById('bot-toggle-btn');
+        if (botBody && !botBody.classList.contains('collapsed')) {
+            botBody.classList.add('collapsed');
+            if (toggleBtn) toggleBtn.textContent = '+';
+        }
 
         if (baxiaSolveMode) return; // Already handling - don't double-fire
         baxiaSolveMode = true;
@@ -906,14 +1110,14 @@
             `🔍 <b>Type:</b> ${isRecaptcha ? 'reCAPTCHA' : 'Baxia Punish'}\n` +
             `🔗 <b>Page:</b> ${escapeHtml(window.location.href)}\n` +
             `⏰ <b>Time:</b> ${new Date().toLocaleString()}\n` +
-            `<i>Attempting auto-click... Bot will resume if solved.</i>`,
+            `<i>Attempting auto-click... Bot will resume once solved.</i>`,
             'warn'
         );
 
         // Try auto-clicking the reCAPTCHA checkbox
         tryAutoClickCaptcha(iframeEl, isRecaptcha);
 
-        // Monitor for captcha disappearance (MutationObserver)
+        // Monitor for captcha disappearance
         watchForCaptchaResolution();
     }
 
@@ -923,8 +1127,6 @@
         baxiaClickAttempts++;
 
         // Strategy 1: Find the nested Google reCAPTCHA iframe by title/name
-        //   Google reCAPTCHA embeds: <iframe title="reCAPTCHA" src="https://www.google.com/recaptcha/...">
-        //   We can find it in the main document (if Lazada injected it at top-level)
         const recaptchaIframes = document.querySelectorAll(
             'iframe[title="reCAPTCHA"], ' +
             'iframe[src*="recaptcha/api2/anchor"], ' +
@@ -934,17 +1136,15 @@
 
         if (recaptchaIframes.length > 0) {
             for (const rcIframe of recaptchaIframes) {
-                if (rcIframe.offsetWidth > 0 && rcIframe.offsetHeight > 0) {
+                if (isElementVisible(rcIframe)) {
                     updateStatus(`🤖 Found reCAPTCHA iframe! Clicking checkbox (attempt ${baxiaClickAttempts})...`, 'warn');
                     clickInsideRecaptchaIframe(rcIframe);
                     break;
                 }
             }
         } else {
-            // Strategy 2: Click on baxia iframe itself at the expected checkbox position.
-            // reCAPTCHA checkbox is at roughly (35, 35) inside the iframe widget.
-            // The baxia iframe is the container - we find the expected offset.
-            if (baxiaIframe && baxiaIframe.offsetWidth > 0) {
+            // Strategy 2: Click on baxia iframe itself at the expected checkbox position
+            if (baxiaIframe && isElementVisible(baxiaIframe)) {
                 updateStatus(`🤖 Clicking baxia container at checkbox position (attempt ${baxiaClickAttempts})...`, 'warn');
                 clickAtIframeCheckboxPosition(baxiaIframe);
             }
@@ -961,28 +1161,24 @@
             }, 2000);
         } else {
             // Gave up auto-solving - notify user to solve manually, keep waiting
-            updateStatus('⚠️ Auto-solve failed. Please solve CAPTCHA manually. Bot will auto-resume.', 'error');
+            updateStatus('⚠️ Auto-solve complete. If CAPTCHA is visible, solve manually (auto-resumes).', 'error');
             sendTelegramNotification(
-                `🚨 <b>Auto-solve FAILED</b>\n` +
-                `Please solve the Lazada CAPTCHA manually.\n` +
+                `🚨 <b>Manual Solve Needed</b>\n` +
+                `Please solve the Lazada CAPTCHA on screen if visible.\n` +
                 `🔗 ${escapeHtml(window.location.href)}\n` +
-                `<i>Bot will auto-resume once CAPTCHA is solved.</i>`,
+                `<i>Bot will auto-resume or refresh if stuck.</i>`,
                 'error'
             );
         }
     }
 
     // Click the checkbox inside a Google reCAPTCHA iframe
-    // The checkbox element is inside a cross-origin iframe, so we use
-    // simulated pointer events at the element's screen position instead.
     function clickInsideRecaptchaIframe(iframe) {
         try {
             const rect = iframe.getBoundingClientRect();
-            // reCAPTCHA checkbox is at approx (28, 28) inside the iframe
             const clickX = rect.left + 28;
             const clickY = rect.top + 28;
 
-            // Simulate realistic pointer event sequence at the checkbox position
             const evtOpts = (type, x, y) => new PointerEvent(type, {
                 bubbles: true, cancelable: true,
                 clientX: x, clientY: y,
@@ -993,15 +1189,12 @@
             document.elementFromPoint(clickX, clickY)?.dispatchEvent(evtOpts('pointerdown', clickX, clickY));
             document.elementFromPoint(clickX, clickY)?.dispatchEvent(evtOpts('pointerup', clickX, clickY));
 
-            // Use elementFromPoint to get the element at that exact coordinate
             const el = document.elementFromPoint(clickX, clickY);
             if (el) {
                 el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: clickX, clientY: clickY, view: window }));
             }
 
-            // Also dispatch directly on the iframe
             iframe.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: clickX, clientY: clickY, view: window }));
-
             console.log(`🤖 [Lazada Bot] Clicked reCAPTCHA at (${clickX.toFixed(0)}, ${clickY.toFixed(0)})`);
         } catch (e) {
             console.warn('🤖 [Lazada Bot] reCAPTCHA click error:', e);
@@ -1012,8 +1205,6 @@
     function clickAtIframeCheckboxPosition(baxiaIframe) {
         try {
             const rect = baxiaIframe.getBoundingClientRect();
-            // Guess that the reCAPTCHA widget is rendered ~40px from left, ~50% of height
-            // Typical Lazada baxia dialog has reCAPTCHA centered; try multiple positions
             const positions = [
                 { x: rect.left + 35, y: rect.top + (rect.height * 0.5) },  // centre-left
                 { x: rect.left + 35, y: rect.top + 60 },                   // fixed 60px from top
@@ -1031,8 +1222,7 @@
                         el.dispatchEvent(new MouseEvent('mouseup',   { bubbles: true, clientX: x, clientY: y, view: window }));
                         el.dispatchEvent(new MouseEvent('click',     { bubbles: true, clientX: x, clientY: y, view: window }));
                     }
-                    console.log(`🤖 [Lazada Bot] Baxia iframe click position ${i+1}: (${x.toFixed(0)}, ${y.toFixed(0)})`);
-                }, i * 300);
+                }, i * 250);
             });
         } catch (e) {
             console.warn('🤖 [Lazada Bot] Baxia iframe position click error:', e);
@@ -1044,9 +1234,10 @@
         if (baxiaAutoSolveTimer) clearInterval(baxiaAutoSolveTimer);
 
         let checkCount = 0;
+        let consecutiveMissingCount = 0;
+
         baxiaAutoSolveTimer = setInterval(() => {
             if (!state.enabled) {
-                // User stopped the bot while waiting
                 clearInterval(baxiaAutoSolveTimer);
                 baxiaAutoSolveTimer = null;
                 baxiaSolveMode = false;
@@ -1056,51 +1247,62 @@
             const stillThere = checkBaxiaPunish();
 
             if (!stillThere) {
-                // Captcha solved! Resume the bot.
-                clearInterval(baxiaAutoSolveTimer);
-                baxiaAutoSolveTimer = null;
-                baxiaSolveMode = false;
-                baxiaClickAttempts = 0;
+                consecutiveMissingCount++;
+                // If missing for 2 consecutive seconds, consider it solved/dismissed!
+                if (consecutiveMissingCount >= 2) {
+                    clearInterval(baxiaAutoSolveTimer);
+                    baxiaAutoSolveTimer = null;
+                    baxiaSolveMode = false;
+                    baxiaClickAttempts = 0;
 
-                updateStatus('✅ CAPTCHA solved! Bot resuming in 2s...', 'success');
-                sendTelegramNotification(
-                    `✅ <b>CAPTCHA Solved!</b>\n` +
-                    `Bot is resuming automatically.\n` +
-                    `🔗 ${escapeHtml(window.location.href)}`,
-                    'success'
-                );
+                    updateStatus('✅ CAPTCHA clear! Bot resuming in 1.5s...', 'success');
+                    sendTelegramNotification(
+                        `✅ <b>CAPTCHA Clear / Solved!</b>\n` +
+                        `Bot resumed monitoring automatically.\n` +
+                        `🔗 ${escapeHtml(window.location.href)}`,
+                        'success'
+                    );
 
-                // Short delay to let the page settle, then resume
-                setTimeout(() => {
-                    if (state.enabled) {
-                        checkAndRunBot();
-                    }
-                }, 2000);
-
-            } else if (checkCount >= 180) {
-                // ~3 minutes without a solve: keep the bot ALIVE, remind the user and keep waiting
-                checkCount = 0;
-                updateStatus('⌛ CAPTCHA still unsolved. Bot is still waiting - please solve it manually.', 'error');
-                sendTelegramNotification(
-                    `⏰ <b>CAPTCHA still unsolved (3 min)</b>\n` +
-                    `Bot is still running and will resume automatically once solved.\n` +
-                    `Please solve the CAPTCHA manually.\n` +
-                    `🔗 ${escapeHtml(window.location.href)}`,
-                    'warn'
-                );
+                    setTimeout(() => {
+                        if (state.enabled) {
+                            checkAndRunBot();
+                        }
+                    }, 1500);
+                }
             } else {
-                // Still waiting - update status every 10s
-                if (checkCount % 10 === 0) {
-                    const secondsLeft = 180 - checkCount;
+                consecutiveMissingCount = 0;
+
+                // Self-healing: If stuck waiting for > 45 seconds (Picture 2 & 5: invisible or stuck captcha halting refresh):
+                // Auto-refresh the page to clear the stuck state and keep the bot alive!
+                if (checkCount >= 45) {
+                    clearInterval(baxiaAutoSolveTimer);
+                    baxiaAutoSolveTimer = null;
+                    baxiaSolveMode = false;
+                    updateStatus('🔄 CAPTCHA timeout (45s). Auto-refreshing to recover...', 'warn');
+                    sendTelegramNotification(
+                        `🔄 <b>CAPTCHA Timeout (45s)</b>\n` +
+                        `Auto-refreshing page to clear stuck state and keep bot active.\n` +
+                        `🔗 ${escapeHtml(window.location.href)}`,
+                        'warn'
+                    );
+                    setTimeout(() => {
+                        window.location.reload();
+                    }, 1000);
+                    return;
+                }
+
+                // Still waiting - update status every 5s
+                if (checkCount % 5 === 0) {
+                    const secondsLeft = 45 - checkCount;
                     updateStatus(
                         baxiaClickAttempts < 10
                             ? `🤖 Auto-solving CAPTCHA... (${secondsLeft}s timeout)`
-                            : `⌛ Waiting for manual CAPTCHA solve... (${secondsLeft}s)`,
+                            : `⌛ Waiting for CAPTCHA solve (${secondsLeft}s till auto-heal refresh)...`,
                         'warn'
                     );
                 }
             }
-        }, 1000); // Check every second
+        }, 1000);
     }
 
     // --- Main Bot Logic ---
@@ -1143,6 +1345,19 @@
             if (window.location.href.includes('/checkout') || window.location.href.includes('checkout.')) {
                 if (checkLoopTimer) { clearInterval(checkLoopTimer); checkLoopTimer = null; }
                 startCheckoutFlow();
+                return;
+            }
+
+            // Watchdog: If state.enabled is true and we've been stuck in isMtopPolling for > 10s, auto-heal
+            const now = Date.now();
+            if (isMtopPolling && (now - lastMtopPollStartTime > 10000)) {
+                console.warn('🤖 [Lazada Bot] Watchdog: MTOP polling was stuck for > 10s. Forcing reset.');
+                isMtopPolling = false;
+                scheduleMtopPoll();
+            }
+
+            // DO NOT call runStockCheck on every 800ms tick if waiting for next scheduled poll or already polling!
+            if (isMtopPolling || mtopPollTimer || reloadTimer) {
                 return;
             }
 
@@ -1232,15 +1447,19 @@
     }
 
     // --- Checkout Automation ---
-    const CHECKOUT_MAX_RETRIES = 5;
+    const CHECKOUT_MAX_RETRIES = 6;
     // Lazada error screens shown when the order can't be built (high traffic / stock gone / risk control)
     const CHECKOUT_ERROR_PATTERNS = [
         'unable to process your order',
+        'unable to process order',
         'system is busy',
         'system busy',
         'something went wrong',
         'too many people',
-        'please try again later'
+        'please try again later',
+        'failed to submit order',
+        'order creation failed',
+        'network error'
     ];
     let checkoutFlowActive = false; // single-flight guard so only one checkout loop runs
 
@@ -1273,11 +1492,23 @@
 
     function findTryAgainButton() {
         const root = document.getElementById('lazada-bot-root');
-        const candidates = Array.from(document.querySelectorAll('button, a, div, span')).reverse();
+
+        // Priority 1: Direct dialog button selectors
+        const dialogBtns = document.querySelectorAll('.next-dialog-btn, .next-btn-primary, button[class*="retry"], [data-spm-click*="retry"]');
+        for (const el of dialogBtns) {
+            if (root && root.contains(el)) continue;
+            const text = (el.innerText || el.textContent || '').trim().toUpperCase();
+            if ((text.includes('TRY AGAIN') || text.includes('RETRY') || text.includes('AGAIN')) && el.offsetWidth > 0 && el.offsetHeight > 0) {
+                return el;
+            }
+        }
+
+        // Priority 2: General clickable elements
+        const candidates = Array.from(document.querySelectorAll('button, a, div[role="button"], span.next-btn')).reverse();
         for (const el of candidates) {
             if (root && root.contains(el)) continue;
             const text = (el.innerText || el.textContent || '').trim().toUpperCase();
-            if ((text === 'TRY AGAIN' || text === 'RETRY') && el.offsetWidth > 0 && el.offsetHeight > 0) {
+            if ((text === 'TRY AGAIN' || text === 'RETRY' || text.includes('TRY AGAIN')) && el.offsetWidth > 0 && el.offsetHeight > 0) {
                 return el;
             }
         }
@@ -1318,23 +1549,28 @@
             sendTelegramNotification(
                 `❌ <b>Checkout Error</b>\n` + variantLine() +
                 `💬 <b>Lazada said:</b> ${escapeHtml(errorText)}\n` +
-                `🔁 Auto-retrying (TRY AGAIN) up to ${CHECKOUT_MAX_RETRIES} times...` +
+                `🔁 Fast auto-retrying (TRY AGAIN) up to ${CHECKOUT_MAX_RETRIES} times...` +
                 `${timingSummary()}\n` +
                 `🔗 ${escapeHtml(window.location.href)}`,
                 'error'
             );
         }
 
-        const backoff = Math.min(500 * Math.pow(2, n - 1), 4000); // 0.5s, 1s, 2s, 4s, 4s
-        updateStatus(`❌ Checkout error (retry ${n}/${CHECKOUT_MAX_RETRIES}). Clicking TRY AGAIN in ${(backoff / 1000).toFixed(1)}s...`, 'error');
+        // Rapid progressive retry delays: 250ms, 450ms, 750ms, 1100ms, 1500ms, 2000ms
+        const fastDelays = [250, 450, 750, 1100, 1500, 2000];
+        const backoff = fastDelays[n - 1] || 1500;
+        updateStatus(`❌ Checkout error (retry ${n}/${CHECKOUT_MAX_RETRIES}). Clicking TRY AGAIN in ${(backoff / 1000).toFixed(2)}s...`, 'error');
 
         setTimeout(() => {
             if (!state.enabled) { checkoutFlowActive = false; return; }
             const btn = findTryAgainButton();
-            if (btn) triggerClick(btn);
-            else window.location.reload();
-            // If the page re-renders in place (no reload), continue the flow
-            setTimeout(() => handleCheckoutPage(0), 2000);
+            if (btn) {
+                triggerClick(btn);
+                // Re-evaluate checkout quickly after click
+                setTimeout(() => handleCheckoutPage(0), 400);
+            } else {
+                window.location.reload();
+            }
         }, backoff);
     }
 
@@ -1561,35 +1797,45 @@
     }
 
     function findPlaceOrderButton() {
-        // Iterate backwards to hit the most deeply nested (innermost) elements first!
-        const candidates = Array.from(document.querySelectorAll('div, button, a, span')).reverse();
-        
-        // 1. Check exact text match first
+        const root = document.getElementById('lazada-bot-root');
+
+        // Priority 1: Direct, standard Lazada checkout order button selectors
+        const quickSelectors = [
+            '.checkout-order-total-button',
+            'button.checkout-order-total-button',
+            '[data-spm-anchor-id*="shipping"]',
+            '.btn-place-order',
+            'button.checkout-order-total-btn',
+            '.checkout-order-total button',
+            'button.automation-btn-place-order'
+        ];
+        for (const sel of quickSelectors) {
+            const els = document.querySelectorAll(sel);
+            for (const el of els) {
+                if (root && root.contains(el)) continue;
+                if (el.offsetWidth > 0 && el.offsetHeight > 0) {
+                    const text = (el.innerText || el.textContent || '').trim().toUpperCase();
+                    if (text.includes('PLACE ORDER')) return el;
+                }
+            }
+        }
+
+        // Priority 2: Buttons and explicit interactive elements
+        const buttons = Array.from(document.querySelectorAll('button, [role="button"], a.next-btn')).reverse();
+        for (const el of buttons) {
+            if (root && root.contains(el)) continue;
+            if (el.offsetWidth > 0 && el.offsetHeight > 0) {
+                const text = (el.innerText || el.textContent || '').trim().toUpperCase();
+                if (text.includes('PLACE ORDER')) return el;
+            }
+        }
+
+        // Priority 3: Fallback DOM scan on container elements
+        const candidates = Array.from(document.querySelectorAll('.checkout-order-total, div.next-btn, span.next-btn')).reverse();
         for (let el of candidates) {
+            if (root && root.contains(el)) continue;
             const text = (el.innerText || el.textContent || '').trim().toUpperCase();
             if ((text === 'PLACE ORDER NOW' || text === 'PLACE ORDER') && el.offsetWidth > 0 && el.offsetHeight > 0) {
-                // Ensure it's the innermost element (no children that also contain the text)
-                const hasTextChild = Array.from(el.children).some(c => {
-                    const cText = (c.innerText || c.textContent || '').trim().toUpperCase();
-                    return cText.includes('PLACE ORDER');
-                });
-                if (!hasTextChild) return el;
-            }
-        }
-
-        // 2. Selector by data-spm-anchor-id or checkout order button class
-        const spmBtns = Array.from(document.querySelectorAll('[data-spm-anchor-id*="shipping"], .checkout-order-total-button, .checkout-order-total')).reverse();
-        for (let el of spmBtns) {
-            const text = (el.innerText || el.textContent || '').trim().toUpperCase();
-            if (text.includes('PLACE ORDER') && el.offsetWidth > 0 && el.offsetHeight > 0) {
-                return el;
-            }
-        }
-
-        // 3. Fallback: check elements containing text PLACE ORDER NOW
-        for (let el of candidates) {
-            const text = (el.innerText || el.textContent || '').trim().toUpperCase();
-            if (text.includes('PLACE ORDER NOW') && el.offsetWidth > 0 && el.offsetHeight > 0) {
                 const hasTextChild = Array.from(el.children).some(c => {
                     const cText = (c.innerText || c.textContent || '').trim().toUpperCase();
                     return cText.includes('PLACE ORDER');
@@ -1793,33 +2039,41 @@
     // --- Multi-Method Stock Detection (no page refresh) ---
 
     // Extract item/sku/seller IDs from __moduleData__ or URL
-    function getProductIds() {
-        try {
-            const md = getModuleData();
-            if (md && md.data && md.data.root && md.data.root.fields) {
-                const fields = md.data.root.fields;
-                if (fields.productOption && fields.productOption.skuBase && fields.productOption.skuBase.skus) {
-                    const sku = fields.productOption.skuBase.skus[0];
-                    if (sku) {
-                        return {
-                            itemId: sku.itemId || sku.cartItemId,
-                            skuId: sku.skuId || sku.cartSkuId,
-                            sellerId: sku.sellerId
-                        };
+    function getProductIds(targetUrl = window.location.href) {
+        const m = targetUrl.match(/i(\d+)-s(\d+)/) || targetUrl.match(/i(\d+)/);
+        let parsedItemId = m ? m[1] : null;
+        let parsedSkuId = (m && m[2]) ? m[2] : null;
+
+        if (targetUrl === window.location.href) {
+            try {
+                const md = getModuleData();
+                if (md && md.data && md.data.root && md.data.root.fields) {
+                    const fields = md.data.root.fields;
+                    if (fields.productOption && fields.productOption.skuBase && fields.productOption.skuBase.skus) {
+                        const sku = fields.productOption.skuBase.skus[0];
+                        if (sku) {
+                            return {
+                                itemId: sku.itemId || sku.cartItemId || parsedItemId,
+                                skuId: parsedSkuId || sku.skuId || sku.cartSkuId,
+                                sellerId: sku.sellerId
+                            };
+                        }
                     }
                 }
-            }
-        } catch (e) {}
+            } catch (e) {}
+        }
 
-        // Fallback: parse from URL (i<itemId>-s<skuId>)
-        const m = window.location.href.match(/i(\d+)-s(\d+)/);
-        if (m) return { itemId: m[1], skuId: m[2], sellerId: null };
+        if (parsedItemId) {
+            return { itemId: parsedItemId, skuId: parsedSkuId, sellerId: null };
+        }
         return null;
     }
 
     // Track MTOP polling timer separately from reload timer
     let mtopPollTimer = null;
     let isMtopPolling = false;
+    let lastMtopPollStartTime = 0;
+    let lastStockCheckTime = 0;
 
     // ── METHOD 1: Read __moduleData__ snapshot (zero-latency, no network call) ──
     // Lazada populates window.__moduleData__ on page load with full product state.
@@ -1953,9 +2207,19 @@
         return calcMD5(str);
     }
 
-    async function checkStockViaFetchMtop(onSuccess, onFail) {
-        const ids = getProductIds();
-        if (!ids || !ids.itemId) { if (onFail) onFail('No item ID'); return; }
+    async function checkStockViaFetchMtop(onSuccess, onFail, targetUrl = null) {
+        const urlToUse = targetUrl || window.location.href;
+        const ids = getProductIds(urlToUse);
+        if (!ids || !ids.itemId) {
+            isMtopPolling = false;
+            if (onFail) onFail('No item ID');
+            return;
+        }
+
+        let uri = window.location.pathname;
+        try {
+            uri = new URL(urlToUse).pathname;
+        } catch (e) {}
 
         const token = getMtopToken();
         const appKey = getMtopAppKey();
@@ -1965,8 +2229,8 @@
 
         const dataObj = {
             deviceType: 'desktop',
-            path: window.location.href,
-            uri: window.location.pathname,
+            path: urlToUse,
+            uri: uri,
             requestParams: JSON.stringify({
                 itemId: ids.itemId,
                 skuId: ids.skuId || '',
@@ -1999,18 +2263,34 @@
 
         console.log('🤖 [Lazada Bot] Fetch MTOP API call for item', ids.itemId);
 
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 6000); // 6s network timeout
+
         try {
             const resp = await fetch(url, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/x-www-form-urlencoded',
-                    'Referer': window.location.href,
+                    'Referer': urlToUse,
                     'Origin': window.location.origin,
                 },
                 body: 'data=' + encodeURIComponent(dataStr),
-                credentials: 'include'
+                credentials: 'include',
+                signal: controller.signal
             });
+            clearTimeout(timeoutId);
+
             let text = await resp.text();
+
+            // Detect security validation challenge
+            if (text.includes('FAIL_SYS_USER_VALIDATE') || text.includes('RGV587_FALSE') || text.includes('deny') || text.includes('punish')) {
+                console.warn('🤖 [Lazada Bot] MTOP API returned anti-creep/punish signal');
+                setTimeout(() => {
+                    const b = checkBaxiaPunish();
+                    if (b) handleBaxiaPunishDetected(b);
+                }, 500);
+            }
+
             // Strip JSONP wrapper if present
             text = text.replace(/^[^(]+\(/, '').replace(/\);?$/, '');
             const json = JSON.parse(text);
@@ -2018,8 +2298,11 @@
             const stockInfo = parseStockFromMtopResponse(json && json.data);
             if (onSuccess) onSuccess(stockInfo, json);
         } catch(e) {
-            console.warn('🤖 [Lazada Bot] Fetch MTOP failed:', e);
+            clearTimeout(timeoutId);
+            console.warn('🤖 [Lazada Bot] Fetch MTOP failed/timeout:', e);
             if (onFail) onFail(e);
+        } finally {
+            lastStockCheckTime = Date.now();
         }
     }
 
@@ -2190,7 +2473,41 @@
         return null;
     }
 
-    // Fallback: variant names from the SKU tiles on the page (stock unknown)
+    // Check live DOM SKU tile disabled/enabled state
+    function getVariantStockFromDom(parts) {
+        try {
+            const root = document.getElementById('module_sku-select') || document;
+            const want = parts.map(p => p.trim().toLowerCase());
+
+            // 1. Check direct SKU tiles
+            const tiles = root.querySelectorAll('.sku-variable-img-wrap, .sku-variable-img-wrap-selected, .sku-prop-content-v2, .sku-prop-item, .sku-item, [class*="sku-variable"], [class*="sku-prop-content"]');
+            for (const tile of tiles) {
+                const text = (tile.getAttribute('title') || tile.textContent || '').trim().toLowerCase();
+                const matched = want.some(w => text.includes(w) || w.includes(text));
+                if (matched) {
+                    const cls = (tile.className || '') + ' ' + (tile.getAttribute('class') || '');
+                    const isDisabled = cls.includes('disabled') || cls.includes('soldout') || cls.includes('out-of-stock') || cls.includes('disable') || tile.getAttribute('aria-disabled') === 'true' || tile.disabled;
+                    return isDisabled ? 0 : 1;
+                }
+            }
+
+            // 2. Also inspect individual sub-nodes if tiles wrapper didn't match directly
+            const nodes = root.querySelectorAll('.sku-variable-img-name, .sku-variable-name, .sku-variable-size, [class*="sku-variable-name"], [class*="sku-variable-img-name"], [class*="sku-variable-size"], .sku-name, .sku-prop-content-v2 span');
+            for (const n of nodes) {
+                let t = (n.getAttribute('title') || n.textContent || '').trim().toLowerCase();
+                t = t.replace(/^.*?:\s*/, '');
+                if (want.some(w => t === w || t.includes(w) || w.includes(t))) {
+                    const tile = n.closest('.sku-variable-img-wrap, .sku-variable-img-wrap-selected, .sku-prop-content-v2, .sku-prop-item, .sku-item') || n;
+                    const cls = (tile.className || '') + ' ' + (tile.getAttribute('class') || '');
+                    const isDisabled = cls.includes('disabled') || cls.includes('soldout') || cls.includes('out-of-stock') || cls.includes('disable') || tile.getAttribute('aria-disabled') === 'true' || tile.disabled;
+                    return isDisabled ? 0 : 1;
+                }
+            }
+        } catch (e) {}
+        return undefined;
+    }
+
+    // Fallback: variant names from the SKU tiles on the page
     function extractVariantsFromDom() {
         const root = document.getElementById('module_sku-select');
         if (!root) return [];
@@ -2200,22 +2517,27 @@
         const nodes = root.querySelectorAll('.sku-variable-img-name, .sku-variable-name, .sku-variable-size, [class*="sku-variable-name"], [class*="sku-variable-img-name"], [class*="sku-variable-size"], .sku-name, .sku-prop-content-v2 span');
         nodes.forEach(n => {
             let name = (n.getAttribute('title') || n.textContent || '').trim();
-            // In v2, sometimes the text has "Color: Red" or similar
-            name = name.replace(/^.*?:\\s*/, '');
+            name = name.replace(/^.*?:\s*/, '');
             if (!name || seen.has(name.toLowerCase())) return;
             seen.add(name.toLowerCase());
-            out.push({ skuId: '', itemId: '', parts: [name], name, key: name.toLowerCase(), stock: undefined, fromDom: true });
+
+            const tile = n.closest('.sku-variable-img-wrap, .sku-variable-img-wrap-selected, .sku-prop-content-v2, .sku-prop-item, .sku-item') || n;
+            const cls = (tile.className || '') + ' ' + (tile.getAttribute('class') || '');
+            const isDisabled = cls.includes('disabled') || cls.includes('soldout') || cls.includes('out-of-stock') || cls.includes('disable') || tile.getAttribute('aria-disabled') === 'true' || tile.disabled;
+            const stock = isDisabled ? 0 : 1;
+
+            out.push({ skuId: '', itemId: '', parts: [name], name, key: name.toLowerCase(), stock: stock, fromDom: true });
         });
         return out.length >= 2 ? out : [];
     }
 
-    // Best available variant list: page data (has stock) -> SKU tiles (names only)
+    // Best available variant list: page data -> SKU tiles fallback
     function getVariants() {
         let variants = extractVariants(getModuleData());
         let source = 'page data';
         if (!variants.length) {
             variants = extractVariantsFromDom();
-            source = 'SKU tiles (stock via API)';
+            source = 'SKU tiles';
         }
         const sig = source + ':' + variants.map(v => `${v.name}=${v.stock}`).join('|');
         if (sig !== lastVariantLogSig) {
@@ -2243,17 +2565,38 @@
         if (!obj || typeof obj !== 'object') return null;
         if (obj.data && obj.data.root && obj.data.root.fields) return obj.data.root.fields;
         if (obj.root && obj.root.fields) return obj.root.fields;
-        if (obj.fields && (obj.fields.skuInfos || obj.fields.productOption)) return obj.fields;
-        if (obj.skuInfos || obj.productOption) return obj;
+        if (obj.fields && (obj.fields.skuInfos || obj.fields.skuInfo || obj.fields.productOption)) return obj.fields;
+        if (obj.skuInfos || obj.skuInfo || obj.productOption) return obj;
         return null;
     }
 
     function pickStockNumber(o) {
         if (!o || typeof o !== 'object') return undefined;
-        for (const k of ['stock', 'sellableQuantity', 'stockNum', 'quantity']) {
+        // Direct quantity / stock fields
+        for (const k of ['stock', 'sellableQuantity', 'stockNum', 'quantity', 'availQuantity', 'salableQuantity', 'realStock', 'saleStock', 'inventoryQuantity', 'totalStock']) {
             const v = o[k];
-            if (typeof v === 'number') return v;
+            if (typeof v === 'number' && !isNaN(v)) return v;
             if (typeof v === 'string' && v.trim() !== '' && !isNaN(v)) return parseInt(v, 10);
+        }
+        // Nested inventory object
+        if (o.inventory && typeof o.inventory === 'object') {
+            for (const k of ['stock', 'quantity', 'sellableQuantity', 'availQuantity']) {
+                const v = o.inventory[k];
+                if (typeof v === 'number' && !isNaN(v)) return v;
+                if (typeof v === 'string' && v.trim() !== '' && !isNaN(v)) return parseInt(v, 10);
+            }
+        }
+        // Nested purchaseOrder
+        if (o.purchaseOrder && (o.purchaseOrder.stock !== undefined || o.purchaseOrder.quantity !== undefined)) {
+            const v = parseInt(o.purchaseOrder.stock !== undefined ? o.purchaseOrder.stock : o.purchaseOrder.quantity, 10);
+            if (!isNaN(v)) return v;
+        }
+        // Buyable / availability flags
+        if (o.buyable === true || (o.actionPanelInfo && o.actionPanelInfo.buyable === true) || o.canBuy === true || o.status === 'AVAILABLE') {
+            return 1;
+        }
+        if (o.buyable === false || (o.actionPanelInfo && o.actionPanelInfo.buyable === false) || o.canBuy === false) {
+            return 0;
         }
         return undefined;
     }
@@ -2275,13 +2618,35 @@
             }
         }
 
-        const skuInfos = fields.skuInfos || {};
+        const skuInfos = fields.skuInfos || fields.skuInfo || {};
         return skus.map(s => {
             const skuId = String(s.skuId || s.cartSkuId || '');
             const parts = String(s.propPath || '').split(';').filter(Boolean)
                 .map(pv => valueNames[pv]).filter(Boolean);
-            let stock = pickStockNumber(skuInfos[skuId]);
-            if (stock === undefined) stock = pickStockNumber(s);
+
+            let info = skuInfos[skuId] || skuInfos[String(skuId)] || skuInfos[s.cartItemId];
+            let stock = pickStockNumber(info);
+
+            // Do NOT fall back to dummy s.stock = 0 from static schema! Only use s if explicit > 0
+            if (stock === undefined && s.stock && s.stock > 0) {
+                stock = s.stock;
+            }
+
+            // Fallback / sync with live DOM tile status
+            const domStock = getVariantStockFromDom(parts.length ? parts : [skuId]);
+            if (stock === undefined || (stock === 0 && domStock === 1)) {
+                if (domStock !== undefined) stock = domStock;
+            }
+
+            // If this variant is the currently selected one on the live page, sync with Buy Now button
+            if (isVariantSelected({ parts, skuId })) {
+                if (checkIsInStock()) {
+                    stock = Math.max(stock || 0, 1);
+                } else if (checkIsOutOfStock()) {
+                    stock = 0;
+                }
+            }
+
             return {
                 skuId,
                 itemId: String(s.itemId || s.cartItemId || ''),
@@ -2358,6 +2723,17 @@
     function evaluateVariants(variants, source) {
         if (!variants || variants.length < 2) return null;
         variantModeActive = true;
+
+        // Synchronize selected variant with live DOM state if Buy Now is active
+        const selected = variants.find(v => isVariantSelected(v));
+        if (selected) {
+            if (checkIsInStock()) {
+                selected.stock = Math.max(selected.stock || 0, 1);
+            } else if (checkIsOutOfStock()) {
+                selected.stock = 0;
+            }
+        }
+
         renderVariantPanel(variants);
         if (!variants.some(v => v.stock !== undefined)) return null;
 
@@ -2369,52 +2745,100 @@
 
         if (inStockWatched.length === 0) return false;
 
-        const target = inStockWatched[0]; // highest priority in-stock variant
+        // If the variant already selected on screen is in stock and watched, target it directly
+        let target = inStockWatched[0];
+        if (selected && inStockWatched.some(v => v.key === selected.key) && checkIsInStock()) {
+            target = selected;
+        }
+
         updateStatus(`📦 VARIANT IN STOCK: ${target.name} (${target.stock})! Taking action...`, 'success');
         if (mtopPollTimer) { clearInterval(mtopPollTimer); mtopPollTimer = null; }
         if (reloadTimer) { clearInterval(reloadTimer); reloadTimer = null; }
         if (checkLoopTimer) { clearInterval(checkLoopTimer); checkLoopTimer = null; }
-        handleInStock(source, target, inStockWatched.slice(1));
+        handleInStock(source, target, inStockWatched.filter(v => v.key !== target.key));
         return true;
     }
 
     function getSelectedVariantNames() {
         const root = document.getElementById('module_sku-select') || document;
         const names = new Set();
-        root.querySelectorAll('.sku-name, .sku-variable-img-wrap-selected .sku-variable-img-name, .sku-prop-content-v2.active span, [class*="active"] .sku-name, [class*="selected"] .sku-name').forEach(n => {
+
+        // 1. Check tiles with selected / active classes or aria states
+        const activeTiles = root.querySelectorAll(
+            '.sku-variable-img-wrap-selected, ' +
+            '[class*="sku-variable-img-wrap"][class*="selected"], ' +
+            '.sku-prop-content-v2.active, .sku-prop-content-v2.selected, ' +
+            '[class*="sku-prop-item"][class*="selected"], [class*="sku-prop-item"][class*="active"], ' +
+            '[class*="sku-item"][class*="selected"], [class*="sku-item"][class*="active"], ' +
+            '[aria-selected="true"], [aria-checked="true"]'
+        );
+        activeTiles.forEach(tile => {
+            let t = (tile.getAttribute('title') || '').trim();
+            if (!t) {
+                const nameEl = tile.querySelector('.sku-variable-img-name, .sku-variable-name, .sku-variable-size, .sku-name, span');
+                t = (nameEl ? (nameEl.getAttribute('title') || nameEl.textContent) : tile.textContent || '').trim();
+            }
+            t = t.replace(/^.*?:\s*/, '').toLowerCase();
+            if (t) names.add(t);
+        });
+
+        // 2. Check property header label displaying selected value (e.g. "Pack Type: Mega")
+        root.querySelectorAll('.sku-name, .sku-prop-name, [class*="sku-name"], [class*="sku-selected"], [class*="sku-header-value"]').forEach(n => {
             let t = (n.getAttribute('title') || n.textContent || '').trim();
             t = t.replace(/^.*?:\s*/, '').toLowerCase();
             if (t) names.add(t);
         });
+
         return names;
     }
 
     function isVariantSelected(variant) {
-        if (!variant.parts.length) {
-            return new RegExp(`-s${variant.skuId}(?!\\d)`).test(window.location.pathname);
+        if (!variant) return false;
+
+        // 1. URL contains the exact SKU ID (e.g. -s22025264807.html or ?skuId=22025264807)
+        if (variant.skuId) {
+            const path = window.location.pathname;
+            if (new RegExp(`-s${variant.skuId}(?!\\d)`).test(path)) return true;
+            try {
+                const sp = new URLSearchParams(window.location.search);
+                if (sp.get('skuId') === String(variant.skuId)) return true;
+            } catch (e) {}
         }
+
+        // 2. Check DOM selected tiles / property header
         const sel = getSelectedVariantNames();
-        return variant.parts.every(p => sel.has(p.trim().toLowerCase()));
+        if (variant.parts && variant.parts.length > 0) {
+            return variant.parts.every(p => {
+                const want = p.trim().toLowerCase();
+                if (sel.has(want)) return true;
+                for (const s of sel) {
+                    if (s.includes(want) || want.includes(s)) return true;
+                }
+                return false;
+            });
+        }
+
+        return false;
     }
 
     // Click the tile(s) for this variant (one per option group)
     function clickVariantTiles(variant) {
-        const root = document.getElementById('module_sku-select');
-        if (!root) return false;
+        const root = document.getElementById('module_sku-select') || document;
         const sel = getSelectedVariantNames();
         let clicked = false;
         for (const part of variant.parts) {
             const want = part.trim().toLowerCase();
             if (sel.has(want)) continue;
-            const nodes = root.querySelectorAll('.sku-variable-img-name, .sku-variable-name, .sku-variable-size, [class*="sku-variable-name"], [class*="sku-variable-img-name"], [class*="sku-variable-size"], .sku-name, .sku-prop-content-v2 span, [title]');
+            const nodes = root.querySelectorAll('.sku-variable-img-wrap, .sku-prop-content-v2, .sku-prop-item, .sku-item, [class*="sku-variable-name"], [class*="sku-variable-img-name"], [class*="sku-variable-size"], .sku-name, .sku-prop-content-v2 span, [title]');
             for (const n of nodes) {
-                let t = (n.getAttribute('title') || n.textContent || '').trim();
-                t = t.replace(/^.*?:\s*/, '').toLowerCase();
-                if (t !== want) continue;
-                const tile = n.closest('.sku-variable-img-wrap, .sku-variable-img-wrap-selected, .sku-prop-content-v2') || n;
-                triggerClick(tile);
-                clicked = true;
-                break;
+                let t = (n.getAttribute('title') || n.textContent || '').trim().toLowerCase();
+                t = t.replace(/^.*?:\s*/, '');
+                if (t === want || t.includes(want) || want.includes(t)) {
+                    const tile = n.closest('.sku-variable-img-wrap, .sku-variable-img-wrap-selected, .sku-prop-content-v2, .sku-prop-item, .sku-item') || n;
+                    triggerClick(tile);
+                    clicked = true;
+                    break;
+                }
             }
         }
         return clicked;
@@ -2464,15 +2888,89 @@
         window.location.href = variantUrl(variant);
     }
 
+    let watchlistIndex = 0;
+
+    function runWatchlistStockCheck() {
+        if (!state.enabled || !state.watchlist || state.watchlist.length === 0) return;
+        if (isMtopPolling) return;
+
+        if (watchlistIndex >= state.watchlist.length) watchlistIndex = 0;
+        const targetUrl = state.watchlist[watchlistIndex];
+        const currentItemNum = watchlistIndex + 1;
+        const totalItems = state.watchlist.length;
+        watchlistIndex = (watchlistIndex + 1) % state.watchlist.length;
+
+        isMtopPolling = true;
+        lastMtopPollStartTime = Date.now();
+        updateStatus(`🔍 Checking Watchlist (${currentItemNum}/${totalItems})...`, 'info');
+
+        checkStockViaFetchMtop(
+            function(stockInfo, rawRes) {
+                isMtopPolling = false;
+                if (!state.enabled) return;
+
+                const inStock = evaluateStockFromMtop(stockInfo);
+                if (inStock === true) {
+                    if (mtopPollTimer) { clearInterval(mtopPollTimer); mtopPollTimer = null; }
+                    if (reloadTimer) { clearInterval(reloadTimer); reloadTimer = null; }
+                    if (checkLoopTimer) { clearInterval(checkLoopTimer); checkLoopTimer = null; }
+
+                    updateStatus(`🎉 Watchlist item IN STOCK! Opening product to buy...`, 'success');
+                    sendTelegramNotification(
+                        `🎉 <b>Watchlist Item IN STOCK!</b>\n` +
+                        `Opening product page to buy:\n` +
+                        `🔗 ${escapeHtml(targetUrl)}`,
+                        'success'
+                    );
+
+                    setTimeout(() => {
+                        window.location.href = targetUrl;
+                    }, 200);
+                } else {
+                    const qty = stockInfo && stockInfo.quantity !== undefined ? stockInfo.quantity : 0;
+                    updateStatus(`Out of Stock [Item ${currentItemNum}/${totalItems} (qty:${qty})]. Next in ${state.minRefresh || 8}s...`, 'warn');
+                    scheduleMtopPoll();
+                }
+            },
+            function(err) {
+                isMtopPolling = false;
+                if (!state.enabled) return;
+                console.warn('🤖 [Lazada Bot] Watchlist check failed:', err);
+                scheduleMtopPoll();
+            },
+            targetUrl
+        );
+    }
+
     function runStockCheck() {
         if (!state.enabled) return;
-        if (isMtopPolling) return; // Already polling, skip tick
+        if (isMtopPolling || mtopPollTimer || reloadTimer) return; // Prevent concurrent or un-scheduled checks
+
+        // Multi-product watchlist mode: cycle across configured product links
+        if (state.watchlist && state.watchlist.length > 0) {
+            runWatchlistStockCheck();
+            return;
+        }
 
         // ── STEP 0: Multi-variant products - evaluate ALL variants from the page snapshot ──
         const mdVariantResult = evaluateVariants(getVariants(), 'page snapshot');
         if (mdVariantResult === true) return;
         if (mdVariantResult === false) {
+            if (checkIsInStock()) {
+                const domRes = evaluateVariants(getVariants(), 'live DOM (Buy Now active)');
+                if (domRes === true) return;
+            }
             updateStatus(`Out of Stock (snapshot${lastVariantSummary}). Waiting for API confirmation...`, 'warn');
+        }
+
+        // Live DOM fallback for single-SKU products
+        if (!variantModeActive && checkIsInStock()) {
+            updateStatus('📦 IN STOCK (Buy Now button active)! Taking action...', 'success');
+            if (mtopPollTimer) { clearInterval(mtopPollTimer); mtopPollTimer = null; }
+            if (reloadTimer) { clearInterval(reloadTimer); reloadTimer = null; }
+            if (checkLoopTimer) { clearInterval(checkLoopTimer); checkLoopTimer = null; }
+            handleInStock('live DOM');
+            return;
         }
 
         // ── STEP 1: Try __moduleData__ snapshot (instant, zero network cost) ──
@@ -2496,6 +2994,7 @@
 
         // ── STEP 2: Fetch-based MTOP API (mimics real browser, no Mtop SDK needed) ──
         isMtopPolling = true;
+        lastMtopPollStartTime = Date.now();
         updateStatus('🔍 Checking stock via API (fetch)...', 'info');
 
         checkStockViaFetchMtop(
@@ -2507,6 +3006,10 @@
                 const apiVariantResult = evaluateVariants(extractVariants(stockInfo && stockInfo.raw), 'MTOP API (fetch)');
                 if (apiVariantResult === true) return;
                 if (apiVariantResult === false) {
+                    if (checkIsInStock()) {
+                        const domRes = evaluateVariants(getVariants(), 'live DOM (Buy Now active)');
+                        if (domRes === true) return;
+                    }
                     updateStatus(`Out of Stock${lastVariantSummary}. Next check in ${state.minRefresh || 3}s...`, 'warn');
                     scheduleMtopPoll();
                     return;
@@ -2558,6 +3061,10 @@
                     const sdkVariantResult = evaluateVariants(extractVariants(stockInfo && stockInfo.raw), 'MTOP SDK');
                     if (sdkVariantResult === true) return;
                     if (sdkVariantResult === false) {
+                        if (checkIsInStock()) {
+                            const domRes = evaluateVariants(getVariants(), 'live DOM (Buy Now active)');
+                            if (domRes === true) return;
+                        }
                         updateStatus(`Out of Stock${lastVariantSummary}. Next check in ${state.minRefresh || 3}s...`, 'warn');
                         scheduleMtopPoll();
                         return;
@@ -2592,14 +3099,13 @@
         if (!state.enabled) return;
         if (mtopPollTimer) return; // Already scheduled
 
-        const min = (state.minRefresh || 3) * 1000;
-        const max = (state.maxRefresh || 7) * 1000;
+        const min = (state.minRefresh || 8) * 1000;
+        const max = (state.maxRefresh || 15) * 1000;
         // Human-like jitter: add 200-800ms extra randomness to avoid predictable intervals
         const jitter = Math.floor(Math.random() * 600) + 200;
-        const delay = Math.floor(Math.random() * (max - min + 1)) + min + jitter;
+        const delay = Math.floor(Math.random() * (Math.max(0, max - min) + 1)) + min + jitter;
 
         let countdown = Math.round(delay / 1000);
-        if (mtopPollTimer) clearInterval(mtopPollTimer);
 
         mtopPollTimer = setInterval(() => {
             countdown--;
@@ -2609,7 +3115,10 @@
                 return;
             }
             if (countdown > 0) {
-                updateStatus(`Out of Stock${lastVariantSummary}. Next API check in ${countdown}s...`, 'warn');
+                const label = (state.watchlist && state.watchlist.length > 0)
+                    ? `Out of Stock. Next watchlist check in ${countdown}s...`
+                    : `Out of Stock${lastVariantSummary}. Next API check in ${countdown}s...`;
+                updateStatus(label, 'warn');
             } else {
                 clearInterval(mtopPollTimer);
                 mtopPollTimer = null;
@@ -2956,6 +3465,7 @@
 
     // Re-check periodically in case Lazada's React SPA clears the document body!
     setInterval(() => {
+        if (window.top !== window.self) return;
         if (!document.getElementById('lazada-bot-root')) {
             console.log('🤖 [Lazada Bot] UI was removed by the page, re-injecting...');
             ensureUI();
